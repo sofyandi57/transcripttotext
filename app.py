@@ -61,10 +61,12 @@ with st.sidebar:
     st.caption("Konfigurasi di bawah ini opsional, diisi oleh pengelola app lewat Secrets:")
     webshare_username = st.secrets.get("WEBSHARE_USERNAME", "")
     webshare_password = st.secrets.get("WEBSHARE_PASSWORD", "")
-    proxy_config = build_proxy_config(webshare_username, webshare_password)
+    proxy_host = st.secrets.get("PROXY_HOST", "")
+    proxy_port = st.secrets.get("PROXY_PORT", "")
+    proxy_config = build_proxy_config(webshare_username, webshare_password, proxy_host, proxy_port)
     if not proxy_config:
         st.caption(
-            "⚠️ Proxy (Webshare) belum dikonfigurasi -- transcript kemungkinan gagal "
+            "⚠️ Proxy belum dikonfigurasi -- transcript kemungkinan gagal "
             "diambil kalau app ini jalan di Streamlit Cloud."
         )
 

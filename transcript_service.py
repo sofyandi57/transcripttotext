@@ -29,7 +29,7 @@ from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     VideoUnavailable,
 )
-from youtube_transcript_api.proxies import WebshareProxyConfig
+from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
 
 
 # ---------------------------------------------------------------------------
@@ -109,19 +109,42 @@ def extract_video_id(url_or_id: str) -> str:
 # Proxy configuration
 # ---------------------------------------------------------------------------
 
-def build_proxy_config(webshare_username: str | None, webshare_password: str | None):
+def build_proxy_config(
+    webshare_username: str | None,
+    webshare_password: str | None,
+    proxy_host: str | None = None,
+    proxy_port: str | int | None = None,
+):
     """
-    Bangun konfigurasi proxy Webshare kalau kredensial tersedia.
-    Return None kalau tidak ada kredensial -- pemanggil harus memutuskan
-    apakah mau lanjut tanpa proxy (berisiko RequestBlocked di cloud) atau
-    berhenti dengan pesan error yang jelas.
+    Bangun konfigurasi proxy. Ada dua mode:
+
+    1. Rotating residential Webshare asli -- HANYA username + password
+       (tanpa proxy_host/proxy_port). Library otomatis connect ke gateway
+       rotating resmi Webshare (p.webshare.io) yang mengganti IP tiap
+       request. Ini mode yang paling reliable untuk bypass blokir YouTube.
+
+    2. Proxy statis generik -- username + password + proxy_host + proxy_port.
+       Dipakai untuk paket "Proxy List"/"Proxy Server" (IP tetap, baik dari
+       Webshare maupun provider lain manapun). IP TIDAK ikut rotasi otomatis,
+       jadi lebih gampang ke-block YouTube dibanding mode 1 (lihat README
+       bagian batasan proxy) -- tapi tetap lebih baik daripada tanpa proxy
+       sama sekali kalau mode 1 belum tersedia.
+
+    Return None kalau tidak ada kredensial sama sekali -- pemanggil harus
+    memutuskan apakah mau lanjut tanpa proxy (berisiko RequestBlocked di
+    cloud) atau berhenti dengan pesan error yang jelas.
     """
-    if webshare_username and webshare_password:
-        return WebshareProxyConfig(
-            proxy_username=webshare_username,
-            proxy_password=webshare_password,
-        )
-    return None
+    if not webshare_username or not webshare_password:
+        return None
+
+    if proxy_host and proxy_port:
+        proxy_url = f"http://{webshare_username}:{webshare_password}@{proxy_host}:{proxy_port}"
+        return GenericProxyConfig(http_url=proxy_url, https_url=proxy_url)
+
+    return WebshareProxyConfig(
+        proxy_username=webshare_username,
+        proxy_password=webshare_password,
+    )
 
 
 # ---------------------------------------------------------------------------

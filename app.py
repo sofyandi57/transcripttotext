@@ -307,6 +307,8 @@ with tab_new:
                                 title=effective_title,
                                 language=result.language,
                                 word_count=result.word_count,
+                                full_text=result.full_text,
+                                segments=result.segments,
                             )
                             st.success(f"Ter-index ({ns_info.chunk_count} chunk).")
                             already_indexed = True
@@ -424,7 +426,7 @@ with tab_history:
     else:
         for entry in entries:
             with st.container(border=True):
-                col1, col2 = st.columns([3, 1])
+                col1, col2, col3 = st.columns([3, 1, 1])
                 with col1:
                     video_url = f"https://youtu.be/{entry.video_id}"
                     st.markdown(f"**[{entry.title}]({video_url})** ↗")
@@ -433,7 +435,26 @@ with tab_history:
                         f"{entry.word_count} kata · diproses {entry.processed_at[:10]}"
                     )
                 with col2:
-                    if st.button("Hapus", key=f"del_{entry.video_id}"):
+                    if entry.full_text:
+                        text_for_download = (
+                            format_transcript_with_timestamps(entry.segments)
+                            if entry.segments
+                            else entry.full_text
+                        )
+                        st.download_button(
+                            "⬇️ .txt",
+                            data=text_for_download,
+                            file_name=_build_download_filename(
+                                entry.title, entry.video_id, upload_date=entry.processed_at[:10]
+                            ),
+                            mime="text/plain",
+                            key=f"dl_{entry.video_id}",
+                            use_container_width=True,
+                        )
+                    else:
+                        st.caption("Transcript tidak tersimpan (proses ulang untuk aktifkan)")
+                with col3:
+                    if st.button("Hapus", key=f"del_{entry.video_id}", use_container_width=True):
                         hs.delete_entry(entry.video_id)
                         st.rerun()
 

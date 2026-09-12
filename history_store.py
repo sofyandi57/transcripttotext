@@ -2,22 +2,29 @@
 history_store.py
 
 Penyimpanan metadata riwayat video (judul, kapan diproses, ringkasan
-singkat) -- TERPISAH dari vector embedding di Pinecone.
+singkat) PLUS isi transcript penuh -- supaya bisa di-download lagi dari
+tab Riwayat tanpa fetch ulang ke YouTube. TERPISAH dari vector embedding
+di Pinecone (Pinecone dipakai untuk RAG/similarity search, bukan buat
+nyimpen transcript polos yang gampang diambil balik).
 
 Kenapa perlu file terpisah:
-Pinecone menyimpan embedding + metadata PER CHUNK, bukan per video.
-Untuk menampilkan daftar "riwayat video yang pernah dianalisa" di UI
-(dengan judul yang enak dibaca manusia, bukan cuma hash namespace),
-kita butuh pemetaan video_id -> info ringkas. Ini disimpan sebagai
-JSON sederhana.
+Pinecone menyimpan embedding + metadata PER CHUNK (dan chunk-nya saling
+overlap untuk keperluan retrieval), bukan per video secara utuh. Untuk
+menampilkan daftar "riwayat video yang pernah dianalisa" di UI (dengan
+judul yang enak dibaca manusia, bukan cuma hash namespace) DAN untuk
+menyediakan tombol download transcript yang persis sama dengan aslinya,
+kita butuh salinan tersendiri. Ini disimpan sebagai JSON sederhana.
 
 CATATAN PENTING -- keterbatasan penyimpanan di Streamlit Cloud:
 File JSON ini disimpan di disk lokal container Streamlit Cloud, YANG
 TIDAK PERSISTEN -- bisa hilang saat app di-redeploy atau sleep lalu
 bangun lagi. Jadi:
-  - Vector embedding (isi transcript) tetap aman permanen di Pinecone.
-  - Tapi daftar "riwayat" (judul, kapan diproses) bisa hilang dan perlu
-    dibangun ulang.
+  - Vector embedding (isi transcript, buat Q&A) tetap aman permanen di
+    Pinecone.
+  - Tapi daftar "riwayat" (judul, transcript tersimpan, kapan diproses)
+    bisa hilang dan perlu dibangun ulang -- proses lagi video yang sama,
+    sistem akan skip re-indexing (namespace sudah ada) tapi transcript
+    utuh & tombol download di Riwayat perlu "terisi ulang" lewat itu.
 Ini trade-off yang disepakati di awal (lihat percakapan sebelumnya) --
 kalau nanti riwayat perlu benar-benar permanen, opsi upgrade: simpan
 JSON ini di Pinecone juga (sebagai satu vector dummy di namespace
@@ -29,7 +36,7 @@ supaya scope tetap terkendali.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,6 +51,12 @@ class VideoHistoryEntry:
     language: str
     word_count: int
     processed_at: str  # ISO format
+    # full_text/segments: disimpan supaya transcript bisa di-download lagi
+    # dari tab Riwayat tanpa fetch ulang ke YouTube. Default kosong supaya
+    # entry LAMA (dari sebelum field ini ada) tetap bisa dibaca tanpa error --
+    # tinggal tidak akan ada tombol download untuk entry lama itu.
+    full_text: str = ""
+    segments: list = field(default_factory=list)
 
 
 def _load_all() -> dict[str, dict]:
@@ -67,6 +80,8 @@ def add_entry(
     title: str,
     language: str,
     word_count: int,
+    full_text: str = "",
+    segments: list | None = None,
 ) -> VideoHistoryEntry:
     entry = VideoHistoryEntry(
         video_id=video_id,
@@ -75,6 +90,8 @@ def add_entry(
         language=language,
         word_count=word_count,
         processed_at=datetime.now(timezone.utc).isoformat(),
+        full_text=full_text,
+        segments=segments or [],
     )
     data = _load_all()
     data[video_id] = asdict(entry)
@@ -90,7 +107,11 @@ def get_entry(video_id: str) -> VideoHistoryEntry | None:
 
 def list_entries() -> list[VideoHistoryEntry]:
     data = _load_all()
-    entries = [VideoHistoryEntry(**v) for v in data.values()]
+    # **v pakai default dataclass untuk field yang belum ada di entry lama
+    # (full_text/segments) -- filter dulu ke key yang dikenal biar aman
+    # kalau suatu saat ada key asing lain di JSON lama.
+    known_fields = {f for f in VideoHistoryEntry.__dataclass_fields__}
+    entries = [VideoHistoryEntry(**{k: v for k, v in item.items() if k in known_fields}) for item in data.values()]
     return sorted(entries, key=lambda e: e.processed_at, reverse=True)
 
 

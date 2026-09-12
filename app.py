@@ -32,6 +32,33 @@ from transcript_service import (
 )
 
 
+# Daftar bahasa umum -- termasuk yang dites eksplisit (Thai, Jepang, Korea,
+# Cina, Tamil, Hindi, Turki) plus beberapa bahasa populer lain. Kode ISO
+# yang tidak ada di daftar ini tetap bisa diisi manual lewat field "Kode
+# bahasa lain" -- transcript fetch (youtube-transcript-api) sendiri sudah
+# language-agnostic, daftar ini murni buat kemudahan UI, bukan pembatas.
+_LANGUAGE_OPTIONS = {
+    "Indonesia (id)": "id",
+    "English (en)": "en",
+    "ไทย / Thai (th)": "th",
+    "日本語 / Japanese (ja)": "ja",
+    "한국어 / Korean (ko)": "ko",
+    "中文 / Chinese (zh-Hans)": "zh-Hans",
+    "繁體中文 / Chinese Traditional (zh-Hant)": "zh-Hant",
+    "हिन्दी / Hindi (hi)": "hi",
+    "தமிழ் / Tamil (ta)": "ta",
+    "Türkçe / Turkish (tr)": "tr",
+    "Español / Spanish (es)": "es",
+    "Français / French (fr)": "fr",
+    "العربية / Arabic (ar)": "ar",
+    "Tiếng Việt / Vietnamese (vi)": "vi",
+    "Melayu / Malay (ms)": "ms",
+    "Português / Portuguese (pt)": "pt",
+    "Deutsch / German (de)": "de",
+    "Русский / Russian (ru)": "ru",
+}
+
+
 def _build_download_filename(narasumber: str, video_id: str, upload_date: str = "", ext: str = "txt") -> str:
     """
     Nama file download: narasumber_tanggal.ext. Kalau narasumber kosong,
@@ -153,11 +180,19 @@ with tab_new:
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        lang_priority = st.text_input(
+        selected_langs = st.multiselect(
             "Bahasa",
-            value="id,en",
+            options=list(_LANGUAGE_OPTIONS.keys()),
+            default=["Indonesia (id)", "English (en)"],
             key=f"lang_priority_new_{fv}",
-            help="Prioritas bahasa transcript, pisahkan dengan koma",
+            help="Prioritas bahasa transcript, urut dari yang paling diinginkan. "
+            "Bahasa lain yang tidak ada di daftar: isi kode ISO-nya di bawah.",
+        )
+        custom_lang = st.text_input(
+            "Kode bahasa lain (opsional)",
+            placeholder="mis. bn, ur, fa",
+            key=f"lang_custom_new_{fv}",
+            help="Pisahkan dengan koma kalau lebih dari satu.",
         )
     with col2:
         video_title = st.text_input(
@@ -204,7 +239,8 @@ with tab_new:
         if not url_input.strip():
             st.error("Isi URL/ID video dulu.")
         else:
-            preferred_langs = [l.strip() for l in lang_priority.split(",") if l.strip()]
+            preferred_langs = [_LANGUAGE_OPTIONS[label] for label in selected_langs]
+            preferred_langs += [c.strip() for c in custom_lang.split(",") if c.strip()]
 
             with st.spinner("Mengambil transcript..."):
                 try:

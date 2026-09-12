@@ -30,6 +30,7 @@ from transcript_service import (
     get_video_metadata,
     list_available_languages,
 )
+from audio_service import AudioFetchError, transcribe_audio
 
 
 # Daftar bahasa umum -- termasuk yang dites eksplisit (Thai, Jepang, Korea,
@@ -230,6 +231,7 @@ with tab_new:
         st.session_state.pop("current_metadata", None)
         st.session_state.pop("qa_history", None)
         st.session_state.pop(f"qa_question_input_{fv}", None)
+        st.session_state.pop("whisper_candidate", None)
         st.session_state["form_version"] = fv + 1
         st.rerun()
 
@@ -243,6 +245,7 @@ with tab_new:
         st.session_state.pop("current_translation", None)
         st.session_state.pop("current_pdf", None)
         st.session_state.pop("current_metadata", None)
+        st.session_state.pop("whisper_candidate", None)
 
         if not url_input.strip():
             st.error("Isi URL/ID video dulu.")
@@ -305,10 +308,67 @@ with tab_new:
                             st.table(langs)
                     except TranscriptFetchError:
                         pass
+                    # Video tidak punya caption sama sekali -- tawarkan jalur
+                    # audio+Whisper. Disimpan di session_state (bukan langsung
+                    # dieksekusi) karena ini opt-in eksplisit: biaya & waktunya
+                    # jauh beda dari caption (download audio penuh + kuota
+                    # Groq Whisper), jadi user harus klik tombol terpisah.
+                    st.session_state["whisper_candidate"] = {
+                        "url": url_input,
+                        "video_id": extract_video_id(url_input),
+                        "language": (preferred_langs[0] if preferred_langs else None),
+                    }
                 except VideoNotFoundError as e:
                     st.error(f"🔒 {e}")
                 except TranscriptFetchError as e:
                     st.error(f"⚠️ {e}")
+
+    # Video tanpa caption sama sekali -- tawarkan transkripsi via audio+Whisper.
+    # Eksplisit opt-in (tombol), bukan otomatis, karena jauh lebih mahal & lambat
+    # daripada caption biasa (download audio penuh + kuota Groq Whisper API).
+    whisper_candidate = st.session_state.get("whisper_candidate")
+    if whisper_candidate and "current_result" not in st.session_state:
+        st.warning(
+            "Video ini tidak punya caption/subtitle. Kamu bisa coba transkripsi "
+            "otomatis dari audio pakai Whisper (Groq) -- prosesnya lebih lambat "
+            "dan memakai kuota Groq Whisper."
+        )
+        if st.button("🎙️ Transcribe via Whisper", use_container_width=True):
+            if not groq_api_key:
+                st.error("GROQ_API_KEY belum diset di Secrets -- tidak bisa pakai Whisper.")
+            else:
+                with st.spinner("Mengunduh audio & transkripsi via Whisper... bisa makan waktu beberapa menit."):
+                    try:
+                        result = transcribe_audio(
+                            whisper_candidate["url"],
+                            video_id=whisper_candidate["video_id"],
+                            groq_api_key=groq_api_key,
+                            language=whisper_candidate["language"],
+                            proxy_config=proxy_config,
+                        )
+                        st.session_state["current_result"] = result
+                        metadata = get_video_metadata(result.video_id, youtube_api_key)
+                        st.session_state["current_metadata"] = metadata
+                        st.session_state.pop("whisper_candidate", None)
+
+                        if not hs.get_entry(result.video_id):
+                            hs.add_entry(
+                                video_id=result.video_id,
+                                namespace=ai.video_id_to_namespace(result.video_id),
+                                title=video_title.strip() or (metadata.title if metadata else "") or result.video_id,
+                                language=result.language,
+                                word_count=result.word_count,
+                                full_text=result.full_text,
+                                segments=result.segments,
+                            )
+
+                        st.success(
+                            f"Transkripsi Whisper berhasil. Bahasa: **{result.language}** · "
+                            f"{result.word_count} kata"
+                        )
+                        st.rerun()
+                    except AudioFetchError as e:
+                        st.error(f"⚠️ {e}")
 
     # Kalau transcript sudah berhasil diambil, tampilkan opsi lanjutan
     if "current_result" in st.session_state:

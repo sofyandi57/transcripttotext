@@ -380,47 +380,59 @@ with tab_history:
                         st.rerun()
 
 with tab_proxy:
-    st.subheader("Ganti IP Proxy")
+    st.subheader("Mode Proxy")
     st.caption(
         "Username & password tetap dari Secrets.",
-        help="Cuma IP & port yang diganti di sini. Tersimpan permanen di Pinecone -- tidak hilang saat app redeploy/sleep.",
+        help="Kosongkan IP & Port di bawah untuk pakai mode ROTATING asli Webshare "
+        "(direkomendasikan) -- IP otomatis berganti tiap request, auto-retry 10x kalau "
+        "kena block. Isi IP & Port hanya kalau mau pin ke satu IP statis tertentu "
+        "(tersimpan permanen di Pinecone, tapi TIDAK ikut rotasi otomatis).",
     )
 
     if not pinecone_api_key:
         st.warning("PINECONE_API_KEY belum diisi -- fitur ini butuh Pinecone.", icon="⚠️")
+    elif not webshare_username or not webshare_password:
+        st.warning("WEBSHARE_USERNAME/PASSWORD belum diisi -- proxy belum aktif.", icon="⚠️")
     else:
         if proxy_override:
             updated = proxy_override["updated_at"][:19].replace("T", " ")
-            st.success(f"IP aktif: **{proxy_override['proxy_host']}:{proxy_override['proxy_port']}**")
+            st.info(f"Mode **IP statis**: {proxy_override['proxy_host']}:{proxy_override['proxy_port']}")
             st.caption(f"Diubah manual {updated} UTC")
         elif proxy_host and proxy_port:
-            st.info(f"IP aktif: **{proxy_host}:{proxy_port}** (default)")
+            st.info(f"Mode **IP statis** (default Secrets): {proxy_host}:{proxy_port}")
         else:
-            st.warning("Belum ada proxy dikonfigurasi.", icon="⚠️")
+            st.success("Mode **Rotating** aktif -- IP berganti otomatis tiap request.")
 
         with st.form("proxy_form"):
             col1, col2 = st.columns([3, 1])
             with col1:
-                new_host = st.text_input("IP", value=proxy_host, placeholder="mis. 150.241.118.80")
+                new_host = st.text_input("IP (kosongkan = rotating)", value=proxy_host, placeholder="mis. 150.241.118.80")
             with col2:
                 new_port = st.text_input("Port", value=proxy_port, placeholder="6082")
             submitted = st.form_submit_button("💾 Simpan", type="primary", use_container_width=True)
 
         if submitted:
-            if not new_host.strip() or not new_port.strip():
-                st.error("IP dan port tidak boleh kosong.")
+            if not new_host.strip() and not new_port.strip():
+                try:
+                    ai.delete_proxy_override(pinecone_api_key)
+                    st.success("IP dikosongkan -- kembali ke mode rotating.")
+                    st.rerun()
+                except ai.IndexingError as e:
+                    st.error(f"❌ {e}")
+            elif not new_host.strip() or not new_port.strip():
+                st.error("Isi IP dan Port berdua, atau kosongkan berdua untuk mode rotating.")
             else:
                 try:
                     ai.save_proxy_override(pinecone_api_key, new_host.strip(), new_port.strip())
-                    st.success(f"Tersimpan: {new_host.strip()}:{new_port.strip()}")
+                    st.success(f"Tersimpan (IP statis): {new_host.strip()}:{new_port.strip()}")
                     st.rerun()
                 except (ai.ConfigurationError, ai.IndexingError) as e:
                     st.error(f"❌ {e}")
 
-        if proxy_override and st.button("↩️ Reset ke default"):
+        if proxy_override and st.button("↩️ Reset ke mode rotating"):
             try:
                 ai.delete_proxy_override(pinecone_api_key)
-                st.success("Kembali ke default Secrets.")
+                st.success("Kembali ke mode rotating.")
                 st.rerun()
             except ai.IndexingError as e:
                 st.error(f"❌ {e}")

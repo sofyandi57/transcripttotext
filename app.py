@@ -375,7 +375,7 @@ with tab_new:
                     word_count=result.word_count,
                     metadata=metadata,
                     summary=st.session_state.get("current_summary"),
-                    transcript=result.full_text,
+                    transcript=transcript_with_timestamps,
                     faq_items=st.session_state.get("current_faq", []),
                     qa_history=qa_history,
                 )

@@ -44,7 +44,7 @@ def _build_download_filename(narasumber: str, video_id: str) -> str:
 st.set_page_config(page_title="Transcript AI Powerhouse", page_icon="🧠", layout="centered")
 
 st.title("🧠 YouTube Transcript AI Powerhouse")
-st.caption("Ambil transcript, dapatkan ringkasan, dan tanya-jawab soal isi video pakai AI.")
+st.caption("Transcript, ringkasan, dan tanya-jawab video YouTube.")
 
 # ---------------------------------------------------------------------------
 # Konfigurasi -- semuanya dari Streamlit Secrets (persisten, dikelola
@@ -75,28 +75,24 @@ else:
 proxy_config = build_proxy_config(webshare_username, webshare_password, proxy_host, proxy_port)
 
 with st.sidebar:
-    st.subheader("⚙️ Status Konfigurasi")
-    st.caption("Diisi pengelola app lewat Secrets -- bukan sesuatu yang perlu diisi pengunjung.")
-    st.write("🔑 Google Gemini:", "✅ siap" if google_api_key else "❌ belum diisi")
-    st.write("🔑 Pinecone:", "✅ siap" if pinecone_api_key else "❌ belum diisi")
-    st.write("🌐 Proxy:", "✅ siap" if proxy_config else "❌ belum diisi")
+    st.subheader("⚙️ Status")
+    st.write("Gemini:", "✅" if google_api_key else "❌")
+    st.write("Pinecone:", "✅" if pinecone_api_key else "❌")
+    st.write("Proxy:", "✅" if proxy_config else "❌")
 
 missing_warnings = []
 if not proxy_config:
-    missing_warnings.append(
-        "**Proxy** belum dikonfigurasi -- transcript kemungkinan gagal diambil kalau app "
-        "ini jalan di Streamlit Cloud."
-    )
+    missing_warnings.append("Proxy belum diisi.")
 if not google_api_key:
-    missing_warnings.append("**GOOGLE_API_KEY** belum diisi -- fitur ringkasan & Q&A tidak akan jalan.")
+    missing_warnings.append("GOOGLE_API_KEY belum diisi.")
 if not pinecone_api_key:
-    missing_warnings.append("**PINECONE_API_KEY** belum diisi -- fitur ringkasan & Q&A tidak akan jalan.")
+    missing_warnings.append("PINECONE_API_KEY belum diisi.")
 
 if missing_warnings:
-    with st.expander("⚠️ Ada konfigurasi yang belum lengkap", expanded=True):
+    with st.expander("⚠️ Konfigurasi belum lengkap", expanded=True):
         for w in missing_warnings:
             st.warning(w, icon="⚠️")
-        st.caption("Lihat README.md bagian 'Setup' untuk cara mengisi semua ini lewat Streamlit Secrets.")
+        st.caption("Isi lewat Streamlit Secrets -- lihat README.")
 
 ai_ready = bool(google_api_key and pinecone_api_key)
 
@@ -104,7 +100,7 @@ ai_ready = bool(google_api_key and pinecone_api_key)
 # Tabs: Proses Video Baru | Riwayat | Proxy
 # ---------------------------------------------------------------------------
 
-tab_new, tab_history, tab_proxy = st.tabs(["📼 Proses Video Baru", "🗂️ Riwayat", "🌐 Proxy"])
+tab_new, tab_history, tab_proxy = st.tabs(["📼 Video Baru", "🗂️ Riwayat", "🌐 Proxy"])
 
 with tab_new:
     # Field teks pakai key "berversi" (form_version) supaya tombol Clear
@@ -117,32 +113,37 @@ with tab_new:
     fv = st.session_state["form_version"]
 
     url_input = st.text_input(
-        "URL atau Video ID YouTube",
-        placeholder="https://youtu.be/xxxxxxxxxxx atau xxxxxxxxxxx",
+        "URL / ID Video",
+        placeholder="https://youtu.be/xxxxxxxxxxx",
         key=f"url_input_new_{fv}",
     )
 
     col1, col2, col3 = st.columns(3)
     with col1:
         lang_priority = st.text_input(
-            "Prioritas bahasa (pisah koma)", value="id,en", key=f"lang_priority_new_{fv}"
+            "Bahasa",
+            value="id,en",
+            key=f"lang_priority_new_{fv}",
+            help="Prioritas bahasa transcript, pisahkan dengan koma",
         )
     with col2:
         video_title = st.text_input(
-            "Judul video (opsional, untuk riwayat)",
-            placeholder="Kosongkan -> pakai video ID",
+            "Judul",
+            placeholder="Untuk riwayat",
             key=f"title_new_{fv}",
+            help="Opsional -- kosongkan untuk pakai video ID",
         )
     with col3:
         narasumber = st.text_input(
-            "Narasumber (opsional, untuk nama file download)",
+            "Narasumber",
             placeholder="mis. Michele Yeoh",
             key=f"narasumber_new_{fv}",
+            help="Opsional -- jadi nama file saat download",
         )
 
     btn_col1, btn_col2 = st.columns([3, 1])
     with btn_col1:
-        fetch_clicked = st.button("Ambil & Proses Transcript", type="primary", use_container_width=True)
+        fetch_clicked = st.button("Ambil Transcript", type="primary", use_container_width=True)
     with btn_col2:
         clear_clicked = st.button("🗑️ Clear", use_container_width=True)
 
@@ -161,7 +162,7 @@ with tab_new:
         st.session_state.pop("current_summary", None)
 
         if not url_input.strip():
-            st.error("Isi URL atau video ID dulu.")
+            st.error("Isi URL/ID video dulu.")
         else:
             preferred_langs = [l.strip() for l in lang_priority.split(",") if l.strip()]
 
@@ -184,7 +185,7 @@ with tab_new:
                     try:
                         langs = list_available_languages(url_input, proxy_config=proxy_config)
                         if langs:
-                            st.info("Bahasa yang tersedia untuk video ini:")
+                            st.info("Bahasa tersedia:")
                             st.table(langs)
                     except TranscriptFetchError:
                         pass
@@ -197,7 +198,7 @@ with tab_new:
     if "current_result" in st.session_state:
         result = st.session_state["current_result"]
 
-        with st.expander("📄 Lihat transcript mentah"):
+        with st.expander("📄 Transcript"):
             # Key di-per-video (bukan statis) -- supaya widget selalu benar-benar
             # baru saat ganti video, dan tidak ada risiko menampilkan isi transcript
             # video SEBELUMNYA gara-gara Streamlit menganggap ini widget yang sama.
@@ -218,19 +219,16 @@ with tab_new:
         st.divider()
 
         if not ai_ready:
-            st.info(
-                "GOOGLE_API_KEY dan PINECONE_API_KEY belum diisi di Secrets -- ringkasan "
-                "otomatis dan tanya-jawab AI belum aktif."
-            )
+            st.info("Ringkasan & Q&A belum aktif -- API key belum diisi.")
         else:
             namespace = ai.video_id_to_namespace(result.video_id)
             already_indexed = ai.namespace_exists(pinecone_api_key, namespace)
 
             if already_indexed:
-                st.info("✅ Video ini sudah pernah diproses sebelumnya -- langsung bisa tanya-jawab di bawah.")
+                st.info("✅ Sudah ter-index -- langsung bisa tanya-jawab.")
             else:
-                if st.button("🔎 Index video ini untuk Q&A", use_container_width=True):
-                    with st.spinner("Membuat embedding dan menyimpan ke Pinecone..."):
+                if st.button("🔎 Index untuk Q&A", use_container_width=True):
+                    with st.spinner("Membuat embedding..."):
                         try:
                             ns_info = ai.index_transcript(
                                 video_id=result.video_id,
@@ -245,7 +243,7 @@ with tab_new:
                                 language=result.language,
                                 word_count=result.word_count,
                             )
-                            st.success(f"Video ter-index ({ns_info.chunk_count} chunk). Siap untuk Q&A.")
+                            st.success(f"Ter-index ({ns_info.chunk_count} chunk).")
                             already_indexed = True
                         except ai.ConfigurationError as e:
                             st.error(f"⚙️ {e}")
@@ -257,7 +255,7 @@ with tab_new:
             # --- Ringkasan ---
             st.subheader("📝 Ringkasan")
             if st.button("Buat Ringkasan", use_container_width=True):
-                with st.spinner("Membuat ringkasan (bisa beberapa detik untuk video panjang)..."):
+                with st.spinner("Membuat ringkasan..."):
                     try:
                         summary = ai.summarize_transcript(result.full_text, google_api_key)
                         st.session_state["current_summary"] = summary
@@ -270,11 +268,11 @@ with tab_new:
             st.divider()
 
             # --- Q&A Chat ---
-            st.subheader("💬 Tanya soal isi video")
+            st.subheader("💬 Tanya Jawab")
             if not already_indexed:
-                st.caption("Index video ini dulu (tombol di atas) sebelum bisa bertanya.")
+                st.caption("Index dulu sebelum bertanya.")
             else:
-                question = st.text_input("Pertanyaan kamu", key=f"qa_question_input_{fv}")
+                question = st.text_input("Pertanyaan", key=f"qa_question_input_{fv}")
                 if st.button("Tanya", use_container_width=True) and question.strip():
                     with st.spinner("Mencari jawaban..."):
                         try:
@@ -285,7 +283,7 @@ with tab_new:
                                 pinecone_api_key=pinecone_api_key,
                             )
                             st.markdown(f"**Jawaban:** {qa_result['answer']}")
-                            with st.expander("Lihat sumber kutipan dari transcript"):
+                            with st.expander("Sumber kutipan"):
                                 for i, src in enumerate(qa_result["sources"], 1):
                                     st.caption(f"Kutipan {i}:")
                                     st.text(src[:300] + ("..." if len(src) > 300 else ""))
@@ -295,18 +293,12 @@ with tab_new:
                             st.error(f"⚙️ {e}")
 
 with tab_history:
-    st.subheader("Video yang sudah diproses")
-    st.caption(
-        "⚠️ Daftar ini disimpan di penyimpanan lokal app, yang bisa reset saat app "
-        "di-redeploy di Streamlit Cloud. Data embedding di Pinecone tetap aman -- "
-        "tapi kalau daftar ini kosong padahal kamu yakin sudah pernah proses video, "
-        "cukup masukkan lagi video ID/URL yang sama di tab sebelah; sistem akan "
-        "mendeteksi video itu sudah ter-index dan tidak akan proses ulang dari nol."
-    )
+    st.subheader("Video Diproses")
+    st.caption("Bisa reset saat redeploy -- data Pinecone tetap aman.", help="Kalau daftar kosong padahal video pernah diproses, masukkan lagi video-nya -- sistem deteksi otomatis dari Pinecone, tidak proses ulang dari nol.")
 
     entries = hs.list_entries()
     if not entries:
-        st.info("Belum ada riwayat video yang diproses.")
+        st.info("Belum ada riwayat.")
     else:
         for entry in entries:
             with st.container(border=True):
@@ -325,35 +317,29 @@ with tab_history:
 with tab_proxy:
     st.subheader("Ganti IP Proxy")
     st.caption(
-        "Username & password proxy tetap dari Secrets (WEBSHARE_USERNAME/PASSWORD) -- "
-        "cuma IP & port yang diganti di sini. Perubahan disimpan **permanen** di Pinecone, "
-        "jadi tidak hilang walau app di-redeploy atau 'sleep' lalu bangun lagi."
+        "Username & password tetap dari Secrets.",
+        help="Cuma IP & port yang diganti di sini. Tersimpan permanen di Pinecone -- tidak hilang saat app redeploy/sleep.",
     )
 
     if not pinecone_api_key:
-        st.warning(
-            "PINECONE_API_KEY belum diisi di Secrets -- fitur ganti proxy butuh Pinecone "
-            "untuk menyimpan perubahan secara permanen.",
-            icon="⚠️",
-        )
+        st.warning("PINECONE_API_KEY belum diisi -- fitur ini butuh Pinecone.", icon="⚠️")
     else:
         if proxy_override:
-            st.success(
-                f"IP aktif saat ini: **{proxy_override['proxy_host']}:{proxy_override['proxy_port']}** "
-                f"(di-set manual, terakhir diubah {proxy_override['updated_at'][:19].replace('T', ' ')} UTC)"
-            )
+            updated = proxy_override["updated_at"][:19].replace("T", " ")
+            st.success(f"IP aktif: **{proxy_override['proxy_host']}:{proxy_override['proxy_port']}**")
+            st.caption(f"Diubah manual {updated} UTC")
         elif proxy_host and proxy_port:
-            st.info(f"IP aktif saat ini: **{proxy_host}:{proxy_port}** (default dari Secrets)")
+            st.info(f"IP aktif: **{proxy_host}:{proxy_port}** (default)")
         else:
-            st.warning("Belum ada proxy yang dikonfigurasi sama sekali.", icon="⚠️")
+            st.warning("Belum ada proxy dikonfigurasi.", icon="⚠️")
 
         with st.form("proxy_form"):
             col1, col2 = st.columns([3, 1])
             with col1:
-                new_host = st.text_input("IP Proxy", value=proxy_host, placeholder="mis. 150.241.118.80")
+                new_host = st.text_input("IP", value=proxy_host, placeholder="mis. 150.241.118.80")
             with col2:
-                new_port = st.text_input("Port", value=proxy_port, placeholder="mis. 6082")
-            submitted = st.form_submit_button("💾 Simpan sebagai IP aktif", type="primary", use_container_width=True)
+                new_port = st.text_input("Port", value=proxy_port, placeholder="6082")
+            submitted = st.form_submit_button("💾 Simpan", type="primary", use_container_width=True)
 
         if submitted:
             if not new_host.strip() or not new_port.strip():
@@ -361,21 +347,18 @@ with tab_proxy:
             else:
                 try:
                     ai.save_proxy_override(pinecone_api_key, new_host.strip(), new_port.strip())
-                    st.success(f"Tersimpan. IP aktif sekarang: {new_host.strip()}:{new_port.strip()}")
+                    st.success(f"Tersimpan: {new_host.strip()}:{new_port.strip()}")
                     st.rerun()
                 except (ai.ConfigurationError, ai.IndexingError) as e:
                     st.error(f"❌ {e}")
 
-        if proxy_override and st.button("↩️ Reset ke default Secrets (PROXY_HOST/PROXY_PORT)"):
+        if proxy_override and st.button("↩️ Reset ke default"):
             try:
                 ai.delete_proxy_override(pinecone_api_key)
-                st.success("Override dihapus, kembali ke default Secrets.")
+                st.success("Kembali ke default Secrets.")
                 st.rerun()
             except ai.IndexingError as e:
                 st.error(f"❌ {e}")
 
 st.divider()
-st.caption(
-    "Dibangun dengan youtube-transcript-api, LangChain, Gemini, dan Pinecone. "
-    "Belum mendukung Vimeo/platform lain -- menyusul."
-)
+st.caption("Powered by youtube-transcript-api, LangChain, Gemini & Pinecone.")

@@ -1,0 +1,17 @@
+# Secrets asli -- JANGAN pernah commit ini
+.streamlit/secrets.toml
+
+# Riwayat video lokal (data personal, tidak perlu di-commit)
+video_history.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# Claude Code local dev config
+.claude/

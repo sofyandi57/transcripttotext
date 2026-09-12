@@ -60,15 +60,20 @@ _LANGUAGE_OPTIONS = {
 }
 
 
-def _build_download_filename(narasumber: str, video_id: str, upload_date: str = "", ext: str = "txt") -> str:
+def _build_download_filename(
+    narasumber: str, video_id: str, title: str = "", upload_date: str = "", ext: str = "txt"
+) -> str:
     """
-    Nama file download: narasumber_tanggal.ext. Kalau narasumber kosong,
-    fallback ke video_id supaya tetap unik. Tanggal yang dipakai adalah
-    tanggal upload ASLI video (dari YouTube Data API, kalau tersedia) --
-    fallback ke tanggal proses hari ini kalau YOUTUBE_API_KEY tidak diisi
-    atau lookup-nya gagal.
+    Nama file download: slug_tanggal.ext. Prioritas slug: Narasumber (kalau
+    diisi) -> judul video (manual atau otomatis dari YouTube Data API) ->
+    video_id sebagai jaminan terakhir supaya tetap unik. Sebelumnya `title`
+    tidak pernah dipakai sama sekali di sini -- hasilnya nama file selalu
+    jatuh ke video_id kalau Narasumber kosong, meski judul videonya sudah
+    ada. Tanggal yang dipakai adalah tanggal upload ASLI video (dari YouTube
+    Data API, kalau tersedia) -- fallback ke tanggal proses hari ini kalau
+    YOUTUBE_API_KEY tidak diisi atau lookup-nya gagal.
     """
-    slug_source = narasumber.strip() or video_id
+    slug_source = narasumber.strip() or title.strip() or video_id
     slug = re.sub(r"[^\w\-]+", "_", slug_source).strip("_") or video_id
     tanggal = upload_date or date.today().isoformat()
     return f"{slug}_{tanggal}.{ext}"
@@ -339,7 +344,10 @@ with tab_new:
                 key=f"raw_transcript_display_{result.video_id}",
             )
             download_name = _build_download_filename(
-                narasumber, result.video_id, upload_date=metadata.published_at if metadata else ""
+                narasumber,
+                result.video_id,
+                title=effective_title,
+                upload_date=metadata.published_at if metadata else "",
             )
             st.download_button(
                 "⬇️ Download .txt",
@@ -516,7 +524,11 @@ with tab_new:
                     "⬇️ Download PDF",
                     data=st.session_state["current_pdf"],
                     file_name=_build_download_filename(
-                        narasumber, result.video_id, upload_date=metadata.published_at if metadata else "", ext="pdf"
+                        narasumber,
+                        result.video_id,
+                        title=effective_title,
+                        upload_date=metadata.published_at if metadata else "",
+                        ext="pdf",
                     ),
                     mime="application/pdf",
                     use_container_width=True,
@@ -551,7 +563,7 @@ with tab_history:
                             "⬇️ .txt",
                             data=text_for_download,
                             file_name=_build_download_filename(
-                                entry.title, entry.video_id, upload_date=entry.processed_at[:10]
+                                "", entry.video_id, title=entry.title, upload_date=entry.processed_at[:10]
                             ),
                             mime="text/plain",
                             key=f"dl_{entry.video_id}",

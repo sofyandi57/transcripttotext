@@ -48,28 +48,52 @@ def _proxy_to_url(proxy_config) -> str | None:
     return None
 
 
+# YouTube menandai client "web" (default yt-dlp) sebagai bot dari banyak IP
+# proxy/datacenter ("Sign in to confirm you're not a bot"), tanpa cookies
+# browser asli. Client mobile/TV ini pakai jalur otentikasi berbeda dan
+# sering lolos tanpa cookies -- dicoba berurutan sampai salah satu berhasil.
+_PLAYER_CLIENTS = ["android", "ios", "tv", "web"]
+
+
 def _download_audio(url: str, proxy: str | None, out_dir: str) -> str:
     out_tpl = os.path.join(out_dir, "audio.%(ext)s")
-    cmd = [
-        "yt-dlp", "-x", "--audio-format", "mp3",
-        "--audio-quality", "64K",
-        "-o", out_tpl,
-        "--no-playlist", "--quiet", "--no-warnings",
-    ]
-    if proxy:
-        cmd += ["--proxy", proxy]
-    cmd.append(url)
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
-    except subprocess.CalledProcessError as e:
-        raise AudioFetchError(f"Gagal download audio: {e.stderr.strip()[:300]}") from e
-    except subprocess.TimeoutExpired as e:
-        raise AudioFetchError("Download audio timeout (video terlalu panjang atau koneksi lambat).") from e
+    last_error = ""
 
-    audio_path = os.path.join(out_dir, "audio.mp3")
-    if not os.path.exists(audio_path):
-        raise AudioFetchError("Download audio selesai tapi file mp3 tidak ditemukan.")
-    return audio_path
+    for client in _PLAYER_CLIENTS:
+        cmd = [
+            "yt-dlp", "-x", "--audio-format", "mp3",
+            "--audio-quality", "64K",
+            "--extractor-args", f"youtube:player_client={client}",
+            "-o", out_tpl,
+            "--no-playlist", "--quiet", "--no-warnings",
+        ]
+        if proxy:
+            cmd += ["--proxy", proxy]
+        cmd.append(url)
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
+            audio_path = os.path.join(out_dir, "audio.mp3")
+            if os.path.exists(audio_path):
+                return audio_path
+            last_error = "file mp3 tidak ditemukan setelah download selesai"
+        except subprocess.CalledProcessError as e:
+            last_error = e.stderr.strip()[:300]
+            if "sign in to confirm" not in last_error.lower():
+                # Error lain di luar bot-check (video private/dihapus/dll)
+                # tidak akan hilang dengan ganti client -- langsung berhenti.
+                break
+        except subprocess.TimeoutExpired:
+            raise AudioFetchError(
+                "Download audio timeout (video terlalu panjang atau koneksi lambat)."
+            ) from None
+
+    hint = (
+        " Kemungkinan IP server ditandai sebagai bot oleh YouTube -- coba ganti "
+        "proxy lewat tab \"Proxy\"."
+        if "sign in to confirm" in last_error.lower()
+        else ""
+    )
+    raise AudioFetchError(f"Gagal download audio: {last_error}.{hint}")
 
 
 def _split_audio(mp3_path: str, minutes: int = CHUNK_MINUTES) -> list[str]:

@@ -30,32 +30,50 @@ st.title("🧠 YouTube Transcript AI Powerhouse")
 st.caption("Ambil transcript, dapatkan ringkasan, dan tanya-jawab soal isi video pakai AI.")
 
 # ---------------------------------------------------------------------------
-# Konfigurasi dari Secrets
+# Konfigurasi API key -- diisi langsung oleh pengguna di UI (sidebar).
+# Key HANYA disimpan di session_state (memori sesi browser saat ini),
+# tidak pernah ditulis ke disk -- hilang begitu tab ditutup/direfresh.
+# Kalau deployer sudah isi lewat Streamlit Secrets, itu dipakai sebagai
+# nilai default supaya tidak perlu diketik ulang tiap sesi.
 # ---------------------------------------------------------------------------
 
-webshare_username = st.secrets.get("WEBSHARE_USERNAME", "")
-webshare_password = st.secrets.get("WEBSHARE_PASSWORD", "")
-proxy_config = build_proxy_config(webshare_username, webshare_password)
-
-google_api_key = st.secrets.get("GOOGLE_API_KEY", "")
-pinecone_api_key = st.secrets.get("PINECONE_API_KEY", "")
-
-missing_warnings = []
-if not proxy_config:
-    missing_warnings.append(
-        "**Proxy (Webshare)** belum dikonfigurasi -- transcript kemungkinan gagal diambil kalau app "
-        "ini jalan di Streamlit Cloud."
+with st.sidebar:
+    st.subheader("🔑 API Keys")
+    st.caption(
+        "Isi API key kamu sendiri. Key ini hanya dipakai untuk sesi kamu saat ini "
+        "dan tidak disimpan di server."
     )
-if not google_api_key:
-    missing_warnings.append("**GOOGLE_API_KEY** belum diisi -- fitur ringkasan & Q&A tidak akan jalan.")
-if not pinecone_api_key:
-    missing_warnings.append("**PINECONE_API_KEY** belum diisi -- fitur ringkasan & Q&A tidak akan jalan.")
+    google_api_key = st.text_input(
+        "Google Gemini API Key",
+        value=st.secrets.get("GOOGLE_API_KEY", ""),
+        type="password",
+        key="google_api_key_input",
+        help="Gratis di https://aistudio.google.com/apikey",
+    )
+    pinecone_api_key = st.text_input(
+        "Pinecone API Key",
+        value=st.secrets.get("PINECONE_API_KEY", ""),
+        type="password",
+        key="pinecone_api_key_input",
+        help="Gratis (tier Starter) di https://www.pinecone.io/",
+    )
+    st.divider()
+    st.caption("Konfigurasi di bawah ini opsional, diisi oleh pengelola app lewat Secrets:")
+    webshare_username = st.secrets.get("WEBSHARE_USERNAME", "")
+    webshare_password = st.secrets.get("WEBSHARE_PASSWORD", "")
+    proxy_config = build_proxy_config(webshare_username, webshare_password)
+    if not proxy_config:
+        st.caption(
+            "⚠️ Proxy (Webshare) belum dikonfigurasi -- transcript kemungkinan gagal "
+            "diambil kalau app ini jalan di Streamlit Cloud."
+        )
 
-if missing_warnings:
-    with st.expander("⚠️ Ada konfigurasi yang belum lengkap", expanded=True):
-        for w in missing_warnings:
-            st.warning(w, icon="⚠️")
-        st.caption("Lihat README.md bagian 'Setup' untuk cara mengisi semua ini lewat Streamlit Secrets.")
+if not google_api_key or not pinecone_api_key:
+    st.info(
+        "👈 Isi **Google Gemini API Key** dan **Pinecone API Key** kamu di sidebar untuk "
+        "mengaktifkan ringkasan otomatis dan tanya-jawab AI.",
+        icon="🔑",
+    )
 
 ai_ready = bool(google_api_key and pinecone_api_key)
 
@@ -137,7 +155,7 @@ with tab_new:
 
         if not ai_ready:
             st.info(
-                "Isi GOOGLE_API_KEY dan PINECONE_API_KEY di Secrets untuk mengaktifkan "
+                "Isi Google Gemini API Key dan Pinecone API Key di sidebar untuk mengaktifkan "
                 "ringkasan otomatis dan tanya-jawab AI."
             )
         else:

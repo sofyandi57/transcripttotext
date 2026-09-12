@@ -34,6 +34,7 @@ untuk Gemini cek https://ai.google.dev/gemini-api/docs/models.
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -141,13 +142,57 @@ def _is_rate_limit_error(e: Exception) -> bool:
     return "rate_limit_exceeded" in msg or "429" in msg or ("413" in msg and "token" in msg)
 
 
+def _is_daily_quota_error(e: Exception) -> bool:
+    """
+    Beda dari TPM (token per menit, rolling/leaky bucket, pulih dalam
+    hitungan detik) -- TPD (token per HARI) baru reset setelah menit/jam,
+    bukan detik. Retry pendek kita sama sekali tidak membantu buat kasus
+    ini, jadi harus dideteksi terpisah supaya kita TIDAK buang waktu retry
+    sia-sia dan langsung kasih tahu user apa adanya.
+    """
+    msg = str(e).lower()
+    return "tokens per day" in msg or "(tpd)" in msg
+
+
+def _extract_retry_wait(e: Exception) -> str | None:
+    """
+    Cari perkiraan waktu tunggu dari pesan Groq, mis. 'try again in 8m30.624s'
+    -> '8 menit 31 detik'. Detik dibulatkan supaya tidak menampilkan presisi
+    milidetik yang tidak berguna buat manusia.
+    """
+    match = re.search(r"try again in\s+(?:(\d+(?:\.\d+)?)m(?!s))?(?:(\d+(?:\.\d+)?)s)?", str(e), re.IGNORECASE)
+    if not match or not (match.group(1) or match.group(2)):
+        return None
+    minutes = round(float(match.group(1))) if match.group(1) else 0
+    seconds = round(float(match.group(2))) if match.group(2) else 0
+    parts = []
+    if minutes:
+        parts.append(f"{minutes} menit")
+    if seconds:
+        parts.append(f"{seconds} detik")
+    return " ".join(parts) or "beberapa detik"
+
+
+def _friendly_rate_limit_message(e: Exception) -> str:
+    """Ubah error rate-limit Groq yang berupa JSON mentah jadi kalimat manusiawi."""
+    wait = _extract_retry_wait(e)
+    if _is_daily_quota_error(e):
+        base = "Kuota harian gratis Groq untuk model ini sudah habis"
+    else:
+        base = "Groq lagi sibuk (rate limit token per menit)"
+    return f"{base}. Coba lagi dalam {wait}." if wait else f"{base}. Coba lagi beberapa saat lagi."
+
+
 def _invoke_with_retry(chain, payload: dict):
     """
-    Panggil chain.invoke() dengan retry singkat kalau kena rate limit Groq.
-    TPM Groq adalah rolling/leaky bucket (pulih dalam hitungan detik, bukan
-    nunggu genap satu menit) -- jadi delay pendek + retry biasanya cukup,
-    terutama kalau sebelumnya ada beberapa panggilan AI beruntun (ringkasan,
-    FAQ, Q&A) yang menghabiskan kuota menit itu.
+    Panggil chain.invoke() dengan retry singkat kalau kena rate limit TPM
+    Groq (rolling/leaky bucket, pulih dalam hitungan detik -- delay pendek +
+    retry biasanya cukup, terutama kalau sebelumnya ada beberapa panggilan
+    AI beruntun yang menghabiskan kuota menit itu).
+
+    Kuota HARIAN (TPD) beda cerita -- baru pulih dalam hitungan menit/jam,
+    jadi kalau ketemu itu langsung menyerah dengan pesan jelas alih-alih
+    retry berkali-kali yang percuma.
     """
     last_error: Exception | None = None
     for attempt in range(RATE_LIMIT_MAX_RETRIES):
@@ -155,9 +200,13 @@ def _invoke_with_retry(chain, payload: dict):
             return chain.invoke(payload)
         except Exception as e:
             last_error = e
-            if _is_rate_limit_error(e) and attempt < RATE_LIMIT_MAX_RETRIES - 1:
-                time.sleep(RATE_LIMIT_BASE_DELAY_SECONDS * (attempt + 1))
-                continue
+            if _is_daily_quota_error(e):
+                raise RuntimeError(_friendly_rate_limit_message(e)) from e
+            if _is_rate_limit_error(e):
+                if attempt < RATE_LIMIT_MAX_RETRIES - 1:
+                    time.sleep(RATE_LIMIT_BASE_DELAY_SECONDS * (attempt + 1))
+                    continue
+                raise RuntimeError(_friendly_rate_limit_message(e)) from e
             raise
     raise last_error  # pragma: no cover -- selalu return atau raise di dalam loop
 

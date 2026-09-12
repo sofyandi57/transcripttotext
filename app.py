@@ -8,6 +8,9 @@ Arsitektur:
   app.py (file ini)      -> UI & orkestrasi, tidak ada logika bisnis di sini
 """
 
+import re
+from datetime import date
+
 import streamlit as st
 
 import ai_service as ai
@@ -23,6 +26,20 @@ from transcript_service import (
     get_transcript,
     list_available_languages,
 )
+
+
+def _build_download_filename(narasumber: str, video_id: str) -> str:
+    """
+    Nama file download: narasumber_tanggal-proses.txt. Kalau narasumber
+    kosong, fallback ke video_id supaya tetap unik. Tanggal yang dipakai
+    adalah tanggal saat transcript ini diproses di app (bukan tanggal
+    upload asli video -- itu butuh integrasi terpisah ke YouTube Data API).
+    """
+    slug_source = narasumber.strip() or video_id
+    slug = re.sub(r"[^\w\-]+", "_", slug_source).strip("_") or video_id
+    today = date.today().isoformat()
+    return f"{slug}_{today}.txt"
+
 
 st.set_page_config(page_title="Transcript AI Powerhouse", page_icon="🧠", layout="centered")
 
@@ -90,27 +107,59 @@ ai_ready = bool(google_api_key and pinecone_api_key)
 tab_new, tab_history, tab_proxy = st.tabs(["📼 Proses Video Baru", "🗂️ Riwayat", "🌐 Proxy"])
 
 with tab_new:
+    # Field teks pakai key "berversi" (form_version) supaya tombol Clear
+    # bisa reset tampilannya secara pasti -- session_state.pop(key) + rerun()
+    # saja TIDAK selalu cukup untuk text_input di Streamlit (widget frontend
+    # kadang tetap menampilkan value lama walau state Python-nya sudah
+    # dihapus). Ganti key -> Streamlit menganggapnya widget baru -> pasti kosong.
+    if "form_version" not in st.session_state:
+        st.session_state["form_version"] = 0
+    fv = st.session_state["form_version"]
+
     url_input = st.text_input(
         "URL atau Video ID YouTube",
         placeholder="https://youtu.be/xxxxxxxxxxx atau xxxxxxxxxxx",
-        key="url_input_new",
+        key=f"url_input_new_{fv}",
     )
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         lang_priority = st.text_input(
-            "Prioritas bahasa (pisah koma)", value="id,en", key="lang_priority_new"
+            "Prioritas bahasa (pisah koma)", value="id,en", key=f"lang_priority_new_{fv}"
         )
     with col2:
         video_title = st.text_input(
             "Judul video (opsional, untuk riwayat)",
             placeholder="Kosongkan -> pakai video ID",
-            key="title_new",
+            key=f"title_new_{fv}",
+        )
+    with col3:
+        narasumber = st.text_input(
+            "Narasumber (opsional, untuk nama file download)",
+            placeholder="mis. Michele Yeoh",
+            key=f"narasumber_new_{fv}",
         )
 
-    fetch_clicked = st.button("Ambil & Proses Transcript", type="primary", use_container_width=True)
+    btn_col1, btn_col2 = st.columns([3, 1])
+    with btn_col1:
+        fetch_clicked = st.button("Ambil & Proses Transcript", type="primary", use_container_width=True)
+    with btn_col2:
+        clear_clicked = st.button("🗑️ Clear", use_container_width=True)
+
+    if clear_clicked:
+        st.session_state.pop("current_result", None)
+        st.session_state.pop("current_summary", None)
+        st.session_state.pop(f"qa_question_input_{fv}", None)
+        st.session_state["form_version"] = fv + 1
+        st.rerun()
 
     if fetch_clicked:
+        # Bersihkan hasil video sebelumnya dulu -- supaya kalau fetch video baru
+        # ini gagal, transcript/ringkasan video LAMA tidak nyangkut kelihatan
+        # seolah-olah itu punya video yang baru saja dicoba.
+        st.session_state.pop("current_result", None)
+        st.session_state.pop("current_summary", None)
+
         if not url_input.strip():
             st.error("Isi URL atau video ID dulu.")
         else:
@@ -149,11 +198,20 @@ with tab_new:
         result = st.session_state["current_result"]
 
         with st.expander("📄 Lihat transcript mentah"):
-            st.text_area("Transcript", value=result.full_text, height=200, key="raw_transcript_display")
+            # Key di-per-video (bukan statis) -- supaya widget selalu benar-benar
+            # baru saat ganti video, dan tidak ada risiko menampilkan isi transcript
+            # video SEBELUMNYA gara-gara Streamlit menganggap ini widget yang sama.
+            st.text_area(
+                "Transcript",
+                value=result.full_text,
+                height=200,
+                key=f"raw_transcript_display_{result.video_id}",
+            )
+            download_name = _build_download_filename(narasumber, result.video_id)
             st.download_button(
                 "⬇️ Download .txt",
                 data=result.full_text,
-                file_name=f"transcript_{result.video_id}.txt",
+                file_name=download_name,
                 mime="text/plain",
             )
 
@@ -216,7 +274,7 @@ with tab_new:
             if not already_indexed:
                 st.caption("Index video ini dulu (tombol di atas) sebelum bisa bertanya.")
             else:
-                question = st.text_input("Pertanyaan kamu", key="qa_question_input")
+                question = st.text_input("Pertanyaan kamu", key=f"qa_question_input_{fv}")
                 if st.button("Tanya", use_container_width=True) and question.strip():
                     with st.spinner("Mencari jawaban..."):
                         try:

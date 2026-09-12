@@ -56,6 +56,12 @@ DEFAULT_CHAT_MODEL = "openai/gpt-oss-120b"       # Groq -- ringkasan & Q&A
 DEFAULT_EMBEDDING_MODEL = "models/gemini-embedding-001"  # Gemini -- embedding saja
 EMBEDDING_DIMENSION = 768  # Matryoshka: bisa 3072/1536/768. 768 dipilih untuk hemat storage Pinecone free tier.
 
+# Kalau DEFAULT_CHAT_MODEL kena limit (TPM/TPD), coba model Groq lain
+# secara berurutan -- limit rate Groq itu PER-MODEL per-organisasi, jadi
+# model lain biasanya masih longgar meski satu model kehabisan jatah.
+# Urutan dipilih dari yang paling mirip kualitasnya ke DEFAULT_CHAT_MODEL.
+FALLBACK_CHAT_MODELS = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+
 PINECONE_INDEX_NAME = "youtube-transcript-rag"
 PINECONE_CLOUD = "aws"
 PINECONE_REGION = "us-east-1"  # wajib us-east-1 untuk free tier ("Starter") Pinecone
@@ -183,32 +189,48 @@ def _friendly_rate_limit_message(e: Exception) -> str:
     return f"{base}. Coba lagi dalam {wait}." if wait else f"{base}. Coba lagi beberapa saat lagi."
 
 
-def _invoke_with_retry(chain, payload: dict):
-    """
-    Panggil chain.invoke() dengan retry singkat kalau kena rate limit TPM
-    Groq (rolling/leaky bucket, pulih dalam hitungan detik -- delay pendek +
-    retry biasanya cukup, terutama kalau sebelumnya ada beberapa panggilan
-    AI beruntun yang menghabiskan kuota menit itu).
+def _models_with_fallback(primary_model: str) -> list[str]:
+    """Urutan model yang dicoba: primary dulu, baru fallback (skip duplikat)."""
+    return [primary_model] + [m for m in FALLBACK_CHAT_MODELS if m != primary_model]
 
-    Kuota HARIAN (TPD) beda cerita -- baru pulih dalam hitungan menit/jam,
-    jadi kalau ketemu itu langsung menyerah dengan pesan jelas alih-alih
-    retry berkali-kali yang percuma.
+
+def _invoke_resilient(build_chain, payload: dict, primary_model: str = DEFAULT_CHAT_MODEL):
+    """
+    Panggil chain.invoke() dengan dua lapis ketahanan:
+
+    1. Retry singkat per model kalau kena rate limit TPM (rolling/leaky
+       bucket, pulih dalam hitungan detik).
+    2. Kalau satu model tetap gagal (TPD harian habis, atau TPM tidak
+       pulih setelah retry), pindah ke model Groq fallback berikutnya --
+       limit Groq itu per-model per-organisasi, jadi model lain biasanya
+       masih longgar meski satu model kehabisan jatah.
+
+    Parameters
+    ----------
+    build_chain : callable(model_name: str) -> Runnable
+        Bikin chain (prompt | llm, dengan/tanpa structured output) untuk
+        model tertentu. Dipanggil ulang per model supaya tiap fallback
+        pakai instance ChatGroq-nya sendiri.
+    payload : dict diteruskan ke chain.invoke()
+    primary_model : model utama yang dicoba duluan
     """
     last_error: Exception | None = None
-    for attempt in range(RATE_LIMIT_MAX_RETRIES):
-        try:
-            return chain.invoke(payload)
-        except Exception as e:
-            last_error = e
-            if _is_daily_quota_error(e):
-                raise RuntimeError(_friendly_rate_limit_message(e)) from e
-            if _is_rate_limit_error(e):
-                if attempt < RATE_LIMIT_MAX_RETRIES - 1:
-                    time.sleep(RATE_LIMIT_BASE_DELAY_SECONDS * (attempt + 1))
-                    continue
-                raise RuntimeError(_friendly_rate_limit_message(e)) from e
-            raise
-    raise last_error  # pragma: no cover -- selalu return atau raise di dalam loop
+    for model in _models_with_fallback(primary_model):
+        chain = build_chain(model)
+        for attempt in range(RATE_LIMIT_MAX_RETRIES):
+            try:
+                return chain.invoke(payload)
+            except Exception as e:
+                last_error = e
+                if _is_daily_quota_error(e):
+                    break  # jangan retry model yang sama, langsung coba fallback
+                if _is_rate_limit_error(e):
+                    if attempt < RATE_LIMIT_MAX_RETRIES - 1:
+                        time.sleep(RATE_LIMIT_BASE_DELAY_SECONDS * (attempt + 1))
+                        continue
+                    break  # retry TPM habis di model ini, coba fallback
+                raise  # error lain (bukan rate limit) -- jangan buang waktu coba model lain
+    raise RuntimeError(_friendly_rate_limit_message(last_error)) from last_error
 
 
 def _split_for_llm(text: str) -> list[str]:
@@ -488,23 +510,25 @@ def summarize_transcript(
     if not groq_api_key:
         raise ConfigurationError("GROQ_API_KEY harus diisi untuk membuat ringkasan.")
 
-    try:
-        llm = ChatGroq(model=chat_model, api_key=groq_api_key, temperature=0.3, max_tokens=1500)
+    def _build(prompt):
+        def _fn(model):
+            llm = ChatGroq(model=model, api_key=groq_api_key, temperature=0.3, max_tokens=1500)
+            return prompt | llm
+        return _fn
 
+    try:
         if len(full_text) <= SUMMARY_CHUNK_SIZE:
-            chain = _SUMMARY_PROMPT | llm
-            response = _invoke_with_retry(chain, {"transcript": full_text})
+            response = _invoke_resilient(_build(_SUMMARY_PROMPT), {"transcript": full_text}, chat_model)
             return _extract_text(response.content)
 
         chunks = _split_for_llm(full_text)
-        map_chain = _SUMMARY_MAP_PROMPT | llm
         partial_summaries = [
-            _extract_text(_invoke_with_retry(map_chain, {"chunk": chunk}).content) for chunk in chunks
+            _extract_text(_invoke_resilient(_build(_SUMMARY_MAP_PROMPT), {"chunk": chunk}, chat_model).content)
+            for chunk in chunks
         ]
 
         combined = "\n\n".join(partial_summaries)
-        reduce_chain = _SUMMARY_PROMPT | llm
-        final_response = _invoke_with_retry(reduce_chain, {"transcript": combined})
+        final_response = _invoke_resilient(_build(_SUMMARY_PROMPT), {"transcript": combined}, chat_model)
         return _extract_text(final_response.content)
     except Exception as e:
         raise QueryError(f"Gagal membuat ringkasan: {e}") from e
@@ -575,9 +599,11 @@ def ask_question(
 
         context = "\n\n---\n\n".join(doc.page_content for doc in relevant_docs)
 
-        llm = ChatGroq(model=chat_model, api_key=groq_api_key, temperature=0.2, max_tokens=1000)
-        chain = _QA_PROMPT | llm
-        response = _invoke_with_retry(chain, {"context": context, "question": question})
+        def _build(model):
+            llm = ChatGroq(model=model, api_key=groq_api_key, temperature=0.2, max_tokens=1000)
+            return _QA_PROMPT | llm
+
+        response = _invoke_resilient(_build, {"context": context, "question": question}, chat_model)
 
         return {
             "answer": _extract_text(response.content),
@@ -657,25 +683,27 @@ def generate_faq(
     if not groq_api_key:
         raise ConfigurationError("GROQ_API_KEY harus diisi untuk membuat FAQ.")
 
-    try:
-        llm = ChatGroq(model=chat_model, api_key=groq_api_key, temperature=0.3, max_tokens=2000)
-        structured_llm = llm.with_structured_output(_FAQList, method="json_schema")
+    def _build(prompt):
+        def _fn(model):
+            llm = ChatGroq(model=model, api_key=groq_api_key, temperature=0.3, max_tokens=2000)
+            return prompt | llm.with_structured_output(_FAQList, method="json_schema")
+        return _fn
 
+    try:
         if len(full_text) <= SUMMARY_CHUNK_SIZE:
-            chain = _FAQ_PROMPT | structured_llm
-            result: _FAQList = _invoke_with_retry(chain, {"transcript": full_text, "max_items": max_items})
+            result: _FAQList = _invoke_resilient(
+                _build(_FAQ_PROMPT), {"transcript": full_text, "max_items": max_items}, chat_model
+            )
             return [{"question": item.question, "answer": item.answer} for item in result.items[:max_items]]
 
         chunks = _split_for_llm(full_text)
-        map_chain = _FAQ_MAP_PROMPT | structured_llm
         drafts: list[str] = []
         for chunk in chunks:
-            partial: _FAQList = _invoke_with_retry(map_chain, {"chunk": chunk})
+            partial: _FAQList = _invoke_resilient(_build(_FAQ_MAP_PROMPT), {"chunk": chunk}, chat_model)
             drafts.extend(f"Q: {item.question}\nA: {item.answer}" for item in partial.items)
 
-        reduce_chain = _FAQ_REDUCE_PROMPT | structured_llm
-        final: _FAQList = _invoke_with_retry(
-            reduce_chain, {"drafts": "\n\n".join(drafts), "max_items": max_items}
+        final: _FAQList = _invoke_resilient(
+            _build(_FAQ_REDUCE_PROMPT), {"drafts": "\n\n".join(drafts), "max_items": max_items}, chat_model
         )
         return [{"question": item.question, "answer": item.answer} for item in final.items[:max_items]]
     except Exception as e:

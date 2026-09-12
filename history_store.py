@@ -57,6 +57,13 @@ class VideoHistoryEntry:
     # tinggal tidak akan ada tombol download untuk entry lama itu.
     full_text: str = ""
     segments: list = field(default_factory=list)
+    # summary/faq_items: cache hasil AI supaya video yang sudah pernah
+    # diringkas/dibikinin FAQ TIDAK perlu panggil Groq lagi kalau video yang
+    # sama diproses ulang -- langsung tampilkan yang tersimpan. Ini
+    # penghematan token nyata: kuota Groq gratis kecil, jangan bayar dua kali
+    # untuk hasil yang sama persis.
+    summary: str = ""
+    faq_items: list = field(default_factory=list)
 
 
 def _load_all() -> dict[str, dict]:
@@ -97,6 +104,22 @@ def add_entry(
     data[video_id] = asdict(entry)
     _save_all(data)
     return entry
+
+
+def update_entry(video_id: str, **fields) -> VideoHistoryEntry | None:
+    """
+    Update sebagian field entry yang sudah ada (mis. summary/faq_items
+    setelah dibuat, karena add_entry() dipanggil lebih dulu saat indexing,
+    sebelum ringkasan/FAQ sempat dibuat). Return None kalau entry belum ada
+    sama sekali (video belum pernah di-index) -- pemanggil harus sudah pasti
+    video ini ada di riwayat sebelum update.
+    """
+    data = _load_all()
+    if video_id not in data:
+        return None
+    data[video_id].update(fields)
+    _save_all(data)
+    return VideoHistoryEntry(**data[video_id])
 
 
 def get_entry(video_id: str) -> VideoHistoryEntry | None:

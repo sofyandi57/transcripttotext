@@ -212,9 +212,36 @@ with tab_new:
                         url_input, preferred_langs=preferred_langs, proxy_config=proxy_config
                     )
                     st.session_state["current_result"] = result
-                    st.session_state["current_metadata"] = get_video_metadata(
-                        result.video_id, youtube_api_key
-                    )
+                    metadata = get_video_metadata(result.video_id, youtube_api_key)
+                    st.session_state["current_metadata"] = metadata
+
+                    # Video yang sudah pernah di-index di SESI SEBELUMNYA (jadi
+                    # tombol "Index" tidak muncul lagi karena namespace-nya
+                    # sudah ada di Pinecone) tidak pernah lewat hs.add_entry()
+                    # kalau video_history.json lokal sempat hilang -- pastikan
+                    # entry-nya ada di sini juga, supaya transcript bisa
+                    # di-download dari Riwayat dan cache ringkasan/FAQ di bawah
+                    # ini punya tempat buat nyimpen.
+                    if not hs.get_entry(result.video_id):
+                        hs.add_entry(
+                            video_id=result.video_id,
+                            namespace=ai.video_id_to_namespace(result.video_id),
+                            title=video_title.strip() or (metadata.title if metadata else "") or result.video_id,
+                            language=result.language,
+                            word_count=result.word_count,
+                            full_text=result.full_text,
+                            segments=result.segments,
+                        )
+
+                    # Kalau video ini sudah pernah diringkas/dibikinin FAQ
+                    # sebelumnya (tersimpan di riwayat), langsung pakai itu --
+                    # tidak perlu panggil Groq lagi buat hasil yang sama persis.
+                    cached_entry = hs.get_entry(result.video_id)
+                    if cached_entry and cached_entry.summary:
+                        st.session_state["current_summary"] = cached_entry.summary
+                    if cached_entry and cached_entry.faq_items:
+                        st.session_state["current_faq"] = cached_entry.faq_items
+
                     st.success(
                         f"Transcript berhasil diambil. Bahasa: **{result.language}** · "
                         f"{result.word_count} kata"
@@ -326,6 +353,7 @@ with tab_new:
                     try:
                         summary = ai.summarize_transcript(result.full_text, groq_api_key)
                         st.session_state["current_summary"] = summary
+                        hs.update_entry(result.video_id, summary=summary)
                     except ai.AIServiceError as e:
                         st.error(f"❌ {e}")
 
@@ -339,7 +367,9 @@ with tab_new:
             if st.button("Buat FAQ", use_container_width=True):
                 with st.spinner("Membuat FAQ..."):
                     try:
-                        st.session_state["current_faq"] = ai.generate_faq(result.full_text, groq_api_key)
+                        faq_items = ai.generate_faq(result.full_text, groq_api_key)
+                        st.session_state["current_faq"] = faq_items
+                        hs.update_entry(result.video_id, faq_items=faq_items)
                     except ai.AIServiceError as e:
                         st.error(f"❌ {e}")
 
@@ -359,26 +389,37 @@ with tab_new:
             else:
                 question = st.text_input("Pertanyaan", key=f"qa_question_input_{fv}")
                 if st.button("Tanya", use_container_width=True) and question.strip():
-                    with st.spinner("Mencari jawaban..."):
-                        try:
-                            qa_result = ai.ask_question(
-                                video_id=result.video_id,
-                                question=question,
-                                google_api_key=google_api_key,
-                                groq_api_key=groq_api_key,
-                                pinecone_api_key=pinecone_api_key,
-                            )
-                            qa_history.append(
-                                {
-                                    "question": question,
-                                    "answer": qa_result["answer"],
-                                    "sources": qa_result["sources"],
-                                }
-                            )
-                        except ai.QueryError as e:
-                            st.error(f"❌ {e}")
-                        except ai.ConfigurationError as e:
-                            st.error(f"⚙️ {e}")
+                    # Cache: pertanyaan yang PERSIS SAMA (case/spasi-insensitive)
+                    # untuk video ini tidak perlu panggil Groq lagi -- pindahkan
+                    # entry lama ke atas (paling baru) alih-alih duplikat.
+                    question_key = question.strip().lower()
+                    cached = next(
+                        (qa for qa in qa_history if qa["question"].strip().lower() == question_key), None
+                    )
+                    if cached:
+                        qa_history.remove(cached)
+                        qa_history.append(cached)
+                    else:
+                        with st.spinner("Mencari jawaban..."):
+                            try:
+                                qa_result = ai.ask_question(
+                                    video_id=result.video_id,
+                                    question=question,
+                                    google_api_key=google_api_key,
+                                    groq_api_key=groq_api_key,
+                                    pinecone_api_key=pinecone_api_key,
+                                )
+                                qa_history.append(
+                                    {
+                                        "question": question,
+                                        "answer": qa_result["answer"],
+                                        "sources": qa_result["sources"],
+                                    }
+                                )
+                            except ai.QueryError as e:
+                                st.error(f"❌ {e}")
+                            except ai.ConfigurationError as e:
+                                st.error(f"⚙️ {e}")
 
                 for qa in reversed(qa_history):
                     st.markdown(f"**Q: {qa['question']}**")

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
@@ -140,6 +141,107 @@ def ensure_index_exists(pinecone_api_key: str) -> None:
             metric="cosine",
             spec=ServerlessSpec(cloud=PINECONE_CLOUD, region=PINECONE_REGION),
         )
+
+
+def _get_index(pinecone_api_key: str):
+    """Kembalikan handle index kalau sudah ada, None kalau belum dibuat sama sekali."""
+    pc = Pinecone(api_key=pinecone_api_key)
+    if not pc.has_index(PINECONE_INDEX_NAME):
+        return None
+    return pc.Index(PINECONE_INDEX_NAME)
+
+
+# ---------------------------------------------------------------------------
+# Proxy config override -- disimpan permanen di Pinecone (bukan file lokal),
+# supaya perubahan IP proxy dari UI TIDAK hilang saat app di-redeploy atau
+# "sleep" lalu bangun lagi di Streamlit Cloud (beda dengan video_history.json
+# yang memang didesain sebagai penyimpanan sementara -- lihat history_store.py).
+#
+# Disimpan sebagai satu vector dummy (bukan embedding sungguhan) di namespace
+# khusus "_app_config", datanya sendiri ada di metadata. Ini trik yang sama
+# yang disebut sebagai upgrade path di README untuk riwayat video.
+# ---------------------------------------------------------------------------
+
+CONFIG_NAMESPACE = "_app_config"
+PROXY_CONFIG_ID = "proxy_override"
+
+
+def save_proxy_override(pinecone_api_key: str, proxy_host: str, proxy_port: str) -> None:
+    """Simpan/timpa IP & port proxy aktif -- permanen sampai diganti/direset lagi."""
+    if not pinecone_api_key:
+        raise ConfigurationError("PINECONE_API_KEY harus diisi untuk menyimpan konfigurasi proxy.")
+    if not proxy_host or not proxy_port:
+        raise IndexingError("Host dan port proxy tidak boleh kosong.")
+
+    ensure_index_exists(pinecone_api_key)
+    pc = Pinecone(api_key=pinecone_api_key)
+    index = pc.Index(PINECONE_INDEX_NAME)
+
+    dummy_vector = [1.0] + [0.0] * (EMBEDDING_DIMENSION - 1)  # Pinecone menolak vector semua-nol
+
+    try:
+        index.upsert(
+            vectors=[
+                {
+                    "id": PROXY_CONFIG_ID,
+                    "values": dummy_vector,
+                    "metadata": {
+                        "proxy_host": proxy_host,
+                        "proxy_port": str(proxy_port),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                }
+            ],
+            namespace=CONFIG_NAMESPACE,
+        )
+    except Exception as e:
+        raise IndexingError(f"Gagal menyimpan konfigurasi proxy ke Pinecone: {e}") from e
+
+
+def get_proxy_override(pinecone_api_key: str) -> dict | None:
+    """
+    Ambil IP & port proxy yang tersimpan, kalau ada. Return None kalau belum
+    pernah di-override -- pemanggil harus fallback ke PROXY_HOST/PROXY_PORT
+    di Secrets.
+    """
+    if not pinecone_api_key:
+        return None
+
+    index = _get_index(pinecone_api_key)
+    if index is None:
+        return None
+
+    try:
+        result = index.fetch(ids=[PROXY_CONFIG_ID], namespace=CONFIG_NAMESPACE)
+    except Exception:
+        return None
+
+    record = result.vectors.get(PROXY_CONFIG_ID)
+    if not record:
+        return None
+
+    metadata = record.metadata or {}
+    proxy_host = metadata.get("proxy_host")
+    proxy_port = metadata.get("proxy_port")
+    if not proxy_host or not proxy_port:
+        return None
+
+    return {
+        "proxy_host": proxy_host,
+        "proxy_port": proxy_port,
+        "updated_at": metadata.get("updated_at", ""),
+    }
+
+
+def delete_proxy_override(pinecone_api_key: str) -> None:
+    """Hapus override -- app kembali pakai PROXY_HOST/PROXY_PORT dari Secrets."""
+    index = _get_index(pinecone_api_key)
+    if index is None:
+        return
+    try:
+        index.delete(ids=[PROXY_CONFIG_ID], namespace=CONFIG_NAMESPACE)
+    except Exception as e:
+        raise IndexingError(f"Gagal menghapus override proxy: {e}") from e
 
 
 def namespace_exists(pinecone_api_key: str, namespace: str) -> bool:

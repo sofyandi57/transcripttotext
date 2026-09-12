@@ -42,8 +42,19 @@ pinecone_api_key = st.secrets.get("PINECONE_API_KEY", "")
 
 webshare_username = st.secrets.get("WEBSHARE_USERNAME", "")
 webshare_password = st.secrets.get("WEBSHARE_PASSWORD", "")
-proxy_host = st.secrets.get("PROXY_HOST", "")
-proxy_port = st.secrets.get("PROXY_PORT", "")
+
+# IP & port proxy: kalau ada override tersimpan di Pinecone (diisi lewat tab
+# "Proxy"), itu yang dipakai -- permanen sampai diganti/direset, tidak
+# hilang saat app di-redeploy/sleep. Kalau belum pernah di-override, fallback
+# ke PROXY_HOST/PROXY_PORT di Secrets.
+proxy_override = ai.get_proxy_override(pinecone_api_key) if pinecone_api_key else None
+if proxy_override:
+    proxy_host = proxy_override["proxy_host"]
+    proxy_port = proxy_override["proxy_port"]
+else:
+    proxy_host = st.secrets.get("PROXY_HOST", "")
+    proxy_port = st.secrets.get("PROXY_PORT", "")
+
 proxy_config = build_proxy_config(webshare_username, webshare_password, proxy_host, proxy_port)
 
 with st.sidebar:
@@ -73,10 +84,10 @@ if missing_warnings:
 ai_ready = bool(google_api_key and pinecone_api_key)
 
 # ---------------------------------------------------------------------------
-# Tabs: Proses Video Baru | Riwayat
+# Tabs: Proses Video Baru | Riwayat | Proxy
 # ---------------------------------------------------------------------------
 
-tab_new, tab_history = st.tabs(["📼 Proses Video Baru", "🗂️ Riwayat"])
+tab_new, tab_history, tab_proxy = st.tabs(["📼 Proses Video Baru", "🗂️ Riwayat", "🌐 Proxy"])
 
 with tab_new:
     url_input = st.text_input(
@@ -252,6 +263,58 @@ with tab_history:
                     if st.button("Hapus", key=f"del_{entry.video_id}"):
                         hs.delete_entry(entry.video_id)
                         st.rerun()
+
+with tab_proxy:
+    st.subheader("Ganti IP Proxy")
+    st.caption(
+        "Username & password proxy tetap dari Secrets (WEBSHARE_USERNAME/PASSWORD) -- "
+        "cuma IP & port yang diganti di sini. Perubahan disimpan **permanen** di Pinecone, "
+        "jadi tidak hilang walau app di-redeploy atau 'sleep' lalu bangun lagi."
+    )
+
+    if not pinecone_api_key:
+        st.warning(
+            "PINECONE_API_KEY belum diisi di Secrets -- fitur ganti proxy butuh Pinecone "
+            "untuk menyimpan perubahan secara permanen.",
+            icon="⚠️",
+        )
+    else:
+        if proxy_override:
+            st.success(
+                f"IP aktif saat ini: **{proxy_override['proxy_host']}:{proxy_override['proxy_port']}** "
+                f"(di-set manual, terakhir diubah {proxy_override['updated_at'][:19].replace('T', ' ')} UTC)"
+            )
+        elif proxy_host and proxy_port:
+            st.info(f"IP aktif saat ini: **{proxy_host}:{proxy_port}** (default dari Secrets)")
+        else:
+            st.warning("Belum ada proxy yang dikonfigurasi sama sekali.", icon="⚠️")
+
+        with st.form("proxy_form"):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                new_host = st.text_input("IP Proxy", value=proxy_host, placeholder="mis. 150.241.118.80")
+            with col2:
+                new_port = st.text_input("Port", value=proxy_port, placeholder="mis. 6082")
+            submitted = st.form_submit_button("💾 Simpan sebagai IP aktif", type="primary", use_container_width=True)
+
+        if submitted:
+            if not new_host.strip() or not new_port.strip():
+                st.error("IP dan port tidak boleh kosong.")
+            else:
+                try:
+                    ai.save_proxy_override(pinecone_api_key, new_host.strip(), new_port.strip())
+                    st.success(f"Tersimpan. IP aktif sekarang: {new_host.strip()}:{new_port.strip()}")
+                    st.rerun()
+                except (ai.ConfigurationError, ai.IndexingError) as e:
+                    st.error(f"❌ {e}")
+
+        if proxy_override and st.button("↩️ Reset ke default Secrets (PROXY_HOST/PROXY_PORT)"):
+            try:
+                ai.delete_proxy_override(pinecone_api_key)
+                st.success("Override dihapus, kembali ke default Secrets.")
+                st.rerun()
+            except ai.IndexingError as e:
+                st.error(f"❌ {e}")
 
 st.divider()
 st.caption(

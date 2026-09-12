@@ -220,6 +220,7 @@ with tab_new:
         st.session_state.pop("current_result", None)
         st.session_state.pop("current_summary", None)
         st.session_state.pop("current_faq", None)
+        st.session_state.pop("current_translation", None)
         st.session_state.pop("current_pdf", None)
         st.session_state.pop("current_metadata", None)
         st.session_state.pop("qa_history", None)
@@ -234,6 +235,7 @@ with tab_new:
         st.session_state.pop("current_result", None)
         st.session_state.pop("current_summary", None)
         st.session_state.pop("current_faq", None)
+        st.session_state.pop("current_translation", None)
         st.session_state.pop("current_pdf", None)
         st.session_state.pop("current_metadata", None)
 
@@ -278,6 +280,8 @@ with tab_new:
                         st.session_state["current_summary"] = cached_entry.summary
                     if cached_entry and cached_entry.faq_items:
                         st.session_state["current_faq"] = cached_entry.faq_items
+                    if cached_entry and cached_entry.translation:
+                        st.session_state["current_translation"] = cached_entry.translation
 
                     st.success(
                         f"Transcript berhasil diambil. Bahasa: **{result.language}** · "
@@ -383,6 +387,29 @@ with tab_new:
 
             st.divider()
 
+            # --- Terjemahan -- cuma muncul kalau transcript BUKAN id/en.
+            # Ringkasan/FAQ/Q&A sendiri sudah selalu berbahasa Indonesia
+            # (lihat prompt di ai_service.py) apa pun bahasa videonya --
+            # terjemahan ini beda: isinya LENGKAP, bukan versi padat.
+            lang_code_base = (result.language_code or "").split("-")[0].lower()
+            is_foreign = lang_code_base not in ("id", "en")
+            if is_foreign:
+                st.subheader("🔤 Terjemahan")
+                if st.button("Buat Terjemahan", use_container_width=True):
+                    with st.spinner("Menerjemahkan transcript..."):
+                        try:
+                            translation = ai.translate_transcript(result.full_text, groq_api_key)
+                            st.session_state["current_translation"] = translation
+                            hs.update_entry(result.video_id, translation=translation)
+                        except ai.AIServiceError as e:
+                            st.error(f"❌ {e}")
+
+                if "current_translation" in st.session_state:
+                    with st.expander("Lihat terjemahan", expanded=True):
+                        st.markdown(st.session_state["current_translation"])
+
+                st.divider()
+
             # --- Ringkasan ---
             st.subheader("📝 Ringkasan")
             if st.button("Buat Ringkasan", use_container_width=True):
@@ -478,6 +505,7 @@ with tab_new:
                     metadata=metadata,
                     summary=st.session_state.get("current_summary"),
                     transcript=transcript_with_timestamps,
+                    translation=st.session_state.get("current_translation"),
                     faq_items=st.session_state.get("current_faq", []),
                     qa_history=qa_history,
                 )

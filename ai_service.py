@@ -81,6 +81,13 @@ MAX_FAQ_ITEMS = 10
 SUMMARY_CHUNK_SIZE = 12000
 SUMMARY_CHUNK_OVERLAP = 300
 
+# Chunk KHUSUS terjemahan lebih kecil dari ringkasan -- output terjemahan
+# panjangnya kira-kira SAMA dengan input (beda dari ringkasan yang outputnya
+# jauh lebih pendek), jadi kalau pakai SUMMARY_CHUNK_SIZE, hasil terjemahan
+# bisa kepotong di tengah kalimat karena kehabisan max_tokens.
+TRANSLATE_CHUNK_SIZE = 5000
+TRANSLATE_CHUNK_OVERLAP = 200
+
 RATE_LIMIT_MAX_RETRIES = 3
 RATE_LIMIT_BASE_DELAY_SECONDS = 6
 
@@ -233,12 +240,11 @@ def _invoke_resilient(build_chain, payload: dict, primary_model: str = DEFAULT_C
     raise RuntimeError(_friendly_rate_limit_message(last_error)) from last_error
 
 
-def _split_for_llm(text: str) -> list[str]:
-    """Potong teks jadi bagian <= SUMMARY_CHUNK_SIZE karakter untuk map-reduce."""
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=SUMMARY_CHUNK_SIZE,
-        chunk_overlap=SUMMARY_CHUNK_OVERLAP,
-    )
+def _split_for_llm(
+    text: str, chunk_size: int = SUMMARY_CHUNK_SIZE, chunk_overlap: int = SUMMARY_CHUNK_OVERLAP
+) -> list[str]:
+    """Potong teks jadi bagian <= chunk_size karakter untuk map-reduce/terjemahan per-bagian."""
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     return splitter.split_text(text)
 
 
@@ -532,6 +538,64 @@ def summarize_transcript(
         return _extract_text(final_response.content)
     except Exception as e:
         raise QueryError(f"Gagal membuat ringkasan: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# Terjemahan transcript penuh
+# ---------------------------------------------------------------------------
+
+_TRANSLATE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system",
+     "Kamu menerjemahkan transcript video secara AKURAT dan LENGKAP. "
+     "Terjemahkan SEMUA isi kata demi kata -- jangan meringkas, jangan "
+     "menghilangkan bagian apa pun, jangan menambahkan komentar di luar "
+     "hasil terjemahan itu sendiri. Prioritaskan menerjemahkan ke Bahasa "
+     "Indonesia. HANYA kalau kamu benar-benar tidak bisa menerjemahkan "
+     "dengan baik ke Bahasa Indonesia untuk bahasa sumber ini, gunakan "
+     "Bahasa Inggris sebagai gantinya."),
+    ("human", "Terjemahkan bagian transcript berikut:\n\n{chunk}"),
+])
+
+
+def translate_transcript(
+    full_text: str,
+    groq_api_key: str,
+    chat_model: str = DEFAULT_CHAT_MODEL,
+) -> str:
+    """
+    Terjemahkan transcript PENUH (bukan ringkasan -- semua detail
+    dipertahankan) ke Bahasa Indonesia, fallback ke Inggris kalau model
+    menilai pasangan bahasa sumber->Indonesia terlalu sulit (fallback ini
+    diserahkan ke penilaian model lewat prompt, bukan retry terpisah --
+    LLM translation ke Indonesia vs Inggris sama-sama tergantung
+    kemampuan model yang sama, bukan keterbatasan teknis yang bisa
+    dideteksi lewat kode).
+
+    Transcript panjang diproses per-chunk (BUKAN map-reduce meringkas
+    seperti summarize_transcript() -- di sini tiap chunk diterjemahkan
+    utuh lalu digabung berurutan, supaya tidak ada detail yang hilang).
+    """
+    if not groq_api_key:
+        raise ConfigurationError("GROQ_API_KEY harus diisi untuk menerjemahkan transcript.")
+
+    def _build(model):
+        # max_tokens lebih besar dari ringkasan/FAQ -- output terjemahan
+        # panjangnya kira-kira sama dengan input chunk, bukan versi padat.
+        llm = ChatGroq(model=model, api_key=groq_api_key, temperature=0.2, max_tokens=3000)
+        return _TRANSLATE_PROMPT | llm
+
+    try:
+        chunks = (
+            _split_for_llm(full_text, chunk_size=TRANSLATE_CHUNK_SIZE, chunk_overlap=TRANSLATE_CHUNK_OVERLAP)
+            if len(full_text) > TRANSLATE_CHUNK_SIZE
+            else [full_text]
+        )
+        translated_chunks = [
+            _extract_text(_invoke_resilient(_build, {"chunk": chunk}, chat_model).content) for chunk in chunks
+        ]
+        return "\n\n".join(translated_chunks)
+    except Exception as e:
+        raise QueryError(f"Gagal menerjemahkan transcript: {e}") from e
 
 
 # ---------------------------------------------------------------------------

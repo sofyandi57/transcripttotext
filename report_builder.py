@@ -197,6 +197,7 @@ def build_pdf_report(
     faq_items: list[dict],
     qa_history: list[dict],
     metadata: VideoMetadata | None = None,
+    translation: str | None = None,
 ) -> bytes:
     """
     Susun laporan PDF satu video.
@@ -207,6 +208,8 @@ def build_pdf_report(
     video_id, language, word_count : metadata video dari transcript
     summary : hasil ringkasan (bisa None kalau belum pernah dibuat)
     transcript : isi transcript penuh
+    translation : terjemahan LENGKAP ke Indonesia/Inggris (None kalau
+        video sudah berbahasa id/en, atau belum pernah diterjemahkan)
     faq_items : list of {"question": str, "answer": str} (FAQ otomatis)
     qa_history : list of {"question": str, "answer": str} (tanya-jawab manual)
     metadata : VideoMetadata dari YouTube Data API (opsional -- None kalau
@@ -270,6 +273,13 @@ def build_pdf_report(
         pdf.caption(f"Deskripsi: {metadata.description}")
 
     pdf.ln(3)
+
+    # Terjemahan selalu Latin (Indonesia/Inggris per prompt di ai_service.py)
+    # apa pun script sumbernya -- tidak butuh font/shaping khusus di sini.
+    if translation:
+        pdf.h2("Terjemahan")
+        pdf.body(translation.strip())
+        pdf.ln(3)
 
     pdf.h2("Ringkasan")
     pdf.body(summary.strip() if summary else "(Belum ada ringkasan yang dibuat untuk video ini.)")

@@ -64,6 +64,10 @@ class VideoHistoryEntry:
     # untuk hasil yang sama persis.
     summary: str = ""
     faq_items: list = field(default_factory=list)
+    # translation: hasil terjemahan LENGKAP (bukan ringkasan) ke Bahasa
+    # Indonesia/Inggris, dicache sama seperti summary/faq_items -- video
+    # non-id/en yang sudah pernah diterjemahkan tidak perlu panggil Groq lagi.
+    translation: str = ""
 
 
 def _load_all() -> dict[str, dict]:

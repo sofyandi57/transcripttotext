@@ -5,6 +5,7 @@ Arsitektur:
   transcript_service.py -> ambil transcript mentah dari YouTube
   ai_service.py          -> embedding, index ke Pinecone, ringkasan, Q&A
   history_store.py       -> metadata riwayat video (judul, dll)
+  report_builder.py      -> generate laporan PDF (ringkasan+transcript+Q&A)
   app.py (file ini)      -> UI & orkestrasi, tidak ada logika bisnis di sini
 """
 
@@ -15,6 +16,7 @@ import streamlit as st
 
 import ai_service as ai
 import history_store as hs
+import report_builder
 from transcript_service import (
     BlockedError,
     NoTranscriptError,
@@ -28,9 +30,9 @@ from transcript_service import (
 )
 
 
-def _build_download_filename(narasumber: str, video_id: str) -> str:
+def _build_download_filename(narasumber: str, video_id: str, ext: str = "txt") -> str:
     """
-    Nama file download: narasumber_tanggal-proses.txt. Kalau narasumber
+    Nama file download: narasumber_tanggal-proses.ext. Kalau narasumber
     kosong, fallback ke video_id supaya tetap unik. Tanggal yang dipakai
     adalah tanggal saat transcript ini diproses di app (bukan tanggal
     upload asli video -- itu butuh integrasi terpisah ke YouTube Data API).
@@ -38,7 +40,7 @@ def _build_download_filename(narasumber: str, video_id: str) -> str:
     slug_source = narasumber.strip() or video_id
     slug = re.sub(r"[^\w\-]+", "_", slug_source).strip("_") or video_id
     today = date.today().isoformat()
-    return f"{slug}_{today}.txt"
+    return f"{slug}_{today}.{ext}"
 
 
 st.set_page_config(page_title="Transcript AI Powerhouse", page_icon="🧠", layout="centered")
@@ -54,7 +56,8 @@ st.caption("Transcript, ringkasan, dan tanya-jawab video YouTube.")
 # PROXY_HOST/PROXY_PORT (kalau IP proxy yang dipakai ke-block YouTube).
 # ---------------------------------------------------------------------------
 
-google_api_key = st.secrets.get("GOOGLE_API_KEY", "")
+google_api_key = st.secrets.get("GOOGLE_API_KEY", "")   # embedding saja (Pinecone)
+groq_api_key = st.secrets.get("GROQ_API_KEY", "")        # ringkasan & Q&A
 pinecone_api_key = st.secrets.get("PINECONE_API_KEY", "")
 
 webshare_username = st.secrets.get("WEBSHARE_USERNAME", "")
@@ -77,6 +80,7 @@ proxy_config = build_proxy_config(webshare_username, webshare_password, proxy_ho
 with st.sidebar:
     st.subheader("⚙️ Status")
     st.write("Gemini:", "✅" if google_api_key else "❌")
+    st.write("Groq:", "✅" if groq_api_key else "❌")
     st.write("Pinecone:", "✅" if pinecone_api_key else "❌")
     st.write("Proxy:", "✅" if proxy_config else "❌")
 
@@ -85,6 +89,8 @@ if not proxy_config:
     missing_warnings.append("Proxy belum diisi.")
 if not google_api_key:
     missing_warnings.append("GOOGLE_API_KEY belum diisi.")
+if not groq_api_key:
+    missing_warnings.append("GROQ_API_KEY belum diisi.")
 if not pinecone_api_key:
     missing_warnings.append("PINECONE_API_KEY belum diisi.")
 
@@ -94,7 +100,7 @@ if missing_warnings:
             st.warning(w, icon="⚠️")
         st.caption("Isi lewat Streamlit Secrets -- lihat README.")
 
-ai_ready = bool(google_api_key and pinecone_api_key)
+ai_ready = bool(google_api_key and groq_api_key and pinecone_api_key)
 
 # ---------------------------------------------------------------------------
 # Tabs: Proses Video Baru | Riwayat | Proxy
@@ -150,6 +156,9 @@ with tab_new:
     if clear_clicked:
         st.session_state.pop("current_result", None)
         st.session_state.pop("current_summary", None)
+        st.session_state.pop("current_faq", None)
+        st.session_state.pop("current_pdf", None)
+        st.session_state.pop("qa_history", None)
         st.session_state.pop(f"qa_question_input_{fv}", None)
         st.session_state["form_version"] = fv + 1
         st.rerun()
@@ -160,6 +169,8 @@ with tab_new:
         # seolah-olah itu punya video yang baru saja dicoba.
         st.session_state.pop("current_result", None)
         st.session_state.pop("current_summary", None)
+        st.session_state.pop("current_faq", None)
+        st.session_state.pop("current_pdf", None)
 
         if not url_input.strip():
             st.error("Isi URL/ID video dulu.")
@@ -257,7 +268,7 @@ with tab_new:
             if st.button("Buat Ringkasan", use_container_width=True):
                 with st.spinner("Membuat ringkasan..."):
                     try:
-                        summary = ai.summarize_transcript(result.full_text, google_api_key)
+                        summary = ai.summarize_transcript(result.full_text, groq_api_key)
                         st.session_state["current_summary"] = summary
                     except ai.AIServiceError as e:
                         st.error(f"❌ {e}")
@@ -267,8 +278,26 @@ with tab_new:
 
             st.divider()
 
+            # --- FAQ otomatis ---
+            st.subheader("❓ FAQ")
+            if st.button("Buat FAQ", use_container_width=True):
+                with st.spinner("Membuat FAQ..."):
+                    try:
+                        st.session_state["current_faq"] = ai.generate_faq(result.full_text, groq_api_key)
+                    except ai.AIServiceError as e:
+                        st.error(f"❌ {e}")
+
+            if "current_faq" in st.session_state:
+                for item in st.session_state["current_faq"]:
+                    with st.expander(item["question"]):
+                        st.markdown(item["answer"])
+
+            st.divider()
+
             # --- Q&A Chat ---
             st.subheader("💬 Tanya Jawab")
+            qa_history = st.session_state.setdefault("qa_history", {}).setdefault(result.video_id, [])
+
             if not already_indexed:
                 st.caption("Index dulu sebelum bertanya.")
             else:
@@ -280,17 +309,53 @@ with tab_new:
                                 video_id=result.video_id,
                                 question=question,
                                 google_api_key=google_api_key,
+                                groq_api_key=groq_api_key,
                                 pinecone_api_key=pinecone_api_key,
                             )
-                            st.markdown(f"**Jawaban:** {qa_result['answer']}")
-                            with st.expander("Sumber kutipan"):
-                                for i, src in enumerate(qa_result["sources"], 1):
-                                    st.caption(f"Kutipan {i}:")
-                                    st.text(src[:300] + ("..." if len(src) > 300 else ""))
+                            qa_history.append(
+                                {
+                                    "question": question,
+                                    "answer": qa_result["answer"],
+                                    "sources": qa_result["sources"],
+                                }
+                            )
                         except ai.QueryError as e:
                             st.error(f"❌ {e}")
                         except ai.ConfigurationError as e:
                             st.error(f"⚙️ {e}")
+
+                for qa in reversed(qa_history):
+                    st.markdown(f"**Q: {qa['question']}**")
+                    st.markdown(qa["answer"])
+                    with st.expander("Sumber kutipan"):
+                        for i, src in enumerate(qa["sources"], 1):
+                            st.caption(f"Kutipan {i}:")
+                            st.text(src[:300] + ("..." if len(src) > 300 else ""))
+                    st.divider()
+
+            # --- Laporan PDF ---
+            st.subheader("📄 Laporan PDF")
+            if st.button("Buat PDF", use_container_width=True):
+                pdf_bytes = report_builder.build_pdf_report(
+                    title=video_title.strip() or result.video_id,
+                    video_id=result.video_id,
+                    language=result.language,
+                    word_count=result.word_count,
+                    summary=st.session_state.get("current_summary"),
+                    transcript=result.full_text,
+                    faq_items=st.session_state.get("current_faq", []),
+                    qa_history=qa_history,
+                )
+                st.session_state["current_pdf"] = pdf_bytes
+
+            if "current_pdf" in st.session_state:
+                st.download_button(
+                    "⬇️ Download PDF",
+                    data=st.session_state["current_pdf"],
+                    file_name=_build_download_filename(narasumber, result.video_id, ext="pdf"),
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
 
 with tab_history:
     st.subheader("Video Diproses")

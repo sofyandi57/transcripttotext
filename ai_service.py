@@ -9,16 +9,26 @@ supaya masing-masing lapisan punya tanggung jawab jelas:
   ai_service.py          -> proses transcript jadi ringkasan & jawab pertanyaan
   app.py                 -> UI saja
 
-CATATAN PENTING SOAL NAMA MODEL:
-Model Gemini berganti dengan cepat (dalam hitungan bulan, model lama
-di-shutdown). Supaya kode ini tidak "mati" begitu Google mematikan model
+CATATAN PENTING SOAL PROVIDER & NAMA MODEL:
+Dua provider AI dipakai untuk dua hal yang beda:
+  - Gemini  -> HANYA untuk embedding (index_transcript, ask_question).
+               Dipilih karena video yang sudah di-index sebelumnya di
+               Pinecone pakai vector Gemini 768 dimensi -- ganti provider
+               embedding berarti semua video lama harus di-index ulang.
+  - Groq    -> untuk ringkasan & jawaban Q&A (summarize_transcript,
+               ask_question). Dipindah dari Gemini karena free tier Gemini
+               gampang kena rate limit (429); Groq punya free tier yang
+               jauh lebih longgar dan hosting-nya cepat.
+
+Model API berganti dengan cepat (dalam hitungan bulan, model lama
+di-shutdown). Supaya kode ini tidak "mati" begitu provider mematikan model
 lama, nama model TIDAK di-hardcode di dalam fungsi -- semua diteruskan
 sebagai parameter dengan default yang gampang diubah di satu tempat saja
 (lihat DEFAULT_CHAT_MODEL dan DEFAULT_EMBEDDING_MODEL di bawah).
 
 Kalau suatu saat muncul error semacam "model not found" atau "model
-deprecated", kemungkinan besar cukup update dua konstanta ini -- cek
-https://ai.google.dev/gemini-api/docs/models untuk nama model terbaru.
+decommissioned": untuk Groq cek https://console.groq.com/docs/models,
+untuk Gemini cek https://ai.google.dev/gemini-api/docs/models.
 """
 
 from __future__ import annotations
@@ -29,17 +39,19 @@ from datetime import datetime, timezone
 
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_groq import ChatGroq
 from langchain_pinecone import PineconeVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pydantic import BaseModel, Field
 from pinecone import Pinecone, ServerlessSpec
 
 # ---------------------------------------------------------------------------
-# Konfigurasi default -- ubah di sini kalau Google mengganti/mematikan model.
+# Konfigurasi default -- ubah di sini kalau provider mengganti/mematikan model.
 # ---------------------------------------------------------------------------
 
-DEFAULT_CHAT_MODEL = "gemini-flash-latest"       # alias, otomatis ikut versi stabil terbaru
-DEFAULT_EMBEDDING_MODEL = "models/gemini-embedding-001"
+DEFAULT_CHAT_MODEL = "openai/gpt-oss-120b"       # Groq -- ringkasan & Q&A
+DEFAULT_EMBEDDING_MODEL = "models/gemini-embedding-001"  # Gemini -- embedding saja
 EMBEDDING_DIMENSION = 768  # Matryoshka: bisa 3072/1536/768. 768 dipilih untuk hemat storage Pinecone free tier.
 
 PINECONE_INDEX_NAME = "youtube-transcript-rag"
@@ -48,6 +60,8 @@ PINECONE_REGION = "us-east-1"  # wajib us-east-1 untuk free tier ("Starter") Pin
 
 CHUNK_SIZE = 1500
 CHUNK_OVERLAP = 200
+
+MAX_FAQ_ITEMS = 10
 
 
 # ---------------------------------------------------------------------------
@@ -350,21 +364,22 @@ _SUMMARY_PROMPT = ChatPromptTemplate.from_messages([
 
 def summarize_transcript(
     full_text: str,
-    google_api_key: str,
+    groq_api_key: str,
     chat_model: str = DEFAULT_CHAT_MODEL,
 ) -> str:
     """
-    Ringkas transcript. Untuk video panjang (>1 jam), transcript bisa
-    15.000-25.000+ kata -- ini masih aman untuk context window Gemini
-    Flash (bisa >1 juta token), jadi TIDAK perlu chunking untuk
-    summarization (beda dengan indexing, yang memang perlu di-chunk
-    untuk retrieval presisi).
+    Ringkas transcript lewat Groq. Untuk video panjang (>1 jam), transcript
+    bisa 15.000-25.000+ kata -- model Groq default (Llama 3.3 70B) punya
+    context window 128K token, cukup untuk sebagian besar video tanpa perlu
+    chunking (beda dengan indexing, yang memang perlu di-chunk untuk
+    retrieval presisi). Video YANG SANGAT panjang (>~2.5 jam) bisa melebihi
+    ini -- kalau muncul error context length, itu tandanya.
     """
-    if not google_api_key:
-        raise ConfigurationError("GOOGLE_API_KEY harus diisi untuk membuat ringkasan.")
+    if not groq_api_key:
+        raise ConfigurationError("GROQ_API_KEY harus diisi untuk membuat ringkasan.")
 
     try:
-        llm = ChatGoogleGenerativeAI(model=chat_model, google_api_key=google_api_key, temperature=0.3)
+        llm = ChatGroq(model=chat_model, api_key=groq_api_key, temperature=0.3)
         chain = _SUMMARY_PROMPT | llm
         response = chain.invoke({"transcript": full_text})
         return _extract_text(response.content)
@@ -391,6 +406,7 @@ def ask_question(
     video_id: str,
     question: str,
     google_api_key: str,
+    groq_api_key: str,
     pinecone_api_key: str,
     chat_model: str = DEFAULT_CHAT_MODEL,
     top_k: int = 5,
@@ -398,15 +414,17 @@ def ask_question(
     """
     Jawab pertanyaan soal isi video, berdasarkan retrieval dari Pinecone
     (bukan seluruh transcript sekaligus) -- ini yang membuat Q&A untuk
-    video panjang tetap presisi dan hemat token.
+    video panjang tetap presisi dan hemat token. Embedding pencarian pakai
+    Gemini (google_api_key, harus konsisten dengan yang dipakai saat
+    index_transcript), jawaban akhir dibuat oleh Groq (groq_api_key).
 
     Returns
     -------
     dict dengan keys: "answer", "sources" (list of chunk text yang dipakai)
     """
-    if not google_api_key or not pinecone_api_key:
+    if not google_api_key or not groq_api_key or not pinecone_api_key:
         raise ConfigurationError(
-            "GOOGLE_API_KEY dan PINECONE_API_KEY harus diisi untuk bertanya soal video."
+            "GOOGLE_API_KEY, GROQ_API_KEY, dan PINECONE_API_KEY harus diisi untuk bertanya soal video."
         )
 
     namespace = video_id_to_namespace(video_id)
@@ -434,7 +452,7 @@ def ask_question(
 
         context = "\n\n---\n\n".join(doc.page_content for doc in relevant_docs)
 
-        llm = ChatGoogleGenerativeAI(model=chat_model, google_api_key=google_api_key, temperature=0.2)
+        llm = ChatGroq(model=chat_model, api_key=groq_api_key, temperature=0.2)
         chain = _QA_PROMPT | llm
         response = chain.invoke({"context": context, "question": question})
 
@@ -446,3 +464,61 @@ def ask_question(
         raise
     except Exception as e:
         raise QueryError(f"Gagal menjawab pertanyaan: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# FAQ otomatis
+# ---------------------------------------------------------------------------
+
+class _FAQItem(BaseModel):
+    question: str = Field(description="Pertanyaan yang relevan dengan isi video")
+    answer: str = Field(description="Jawaban singkat dan akurat, hanya berdasarkan transcript")
+
+
+class _FAQList(BaseModel):
+    items: list[_FAQItem] = Field(description="Daftar FAQ, urut dari paling penting")
+
+
+_FAQ_PROMPT = ChatPromptTemplate.from_messages([
+    ("system",
+     "Kamu membuat FAQ (pertanyaan yang sering ditanyakan penonton) dari transcript "
+     "video. Pilih pertanyaan yang paling relevan dan penting yang kemungkinan besar "
+     "ingin diketahui penonton soal isi video ini. Jawaban HARUS berdasarkan transcript "
+     "saja -- jangan mengarang informasi yang tidak ada di sana. "
+     "Jawab dalam Bahasa Indonesia kecuali diminta lain."),
+    ("human",
+     "Buat maksimal {max_items} FAQ dari transcript video berikut:\n\n{transcript}"),
+])
+
+
+def generate_faq(
+    full_text: str,
+    groq_api_key: str,
+    chat_model: str = DEFAULT_CHAT_MODEL,
+    max_items: int = MAX_FAQ_ITEMS,
+) -> list[dict]:
+    """
+    Buat daftar FAQ (maksimal `max_items`) dari transcript, lewat Groq
+    structured output (function calling) supaya hasilnya list Q&A yang
+    rapi, bukan teks bebas yang perlu di-parse manual.
+
+    Returns
+    -------
+    list of {"question": str, "answer": str}, maksimal `max_items` item
+    (model kadang mengabaikan batas jumlah di prompt -- dipotong manual
+    di sini sebagai jaminan).
+    """
+    if not groq_api_key:
+        raise ConfigurationError("GROQ_API_KEY harus diisi untuk membuat FAQ.")
+
+    try:
+        llm = ChatGroq(model=chat_model, api_key=groq_api_key, temperature=0.3)
+        # method="json_schema" -- Groq's dedicated Structured Output API (constrained
+        # decoding, output DIJAMIN sesuai schema). Default "function_calling" pernah
+        # menghasilkan JSON tidak valid (tool_use_failed) untuk daftar sepanjang ini.
+        structured_llm = llm.with_structured_output(_FAQList, method="json_schema")
+        chain = _FAQ_PROMPT | structured_llm
+        result: _FAQList = chain.invoke({"transcript": full_text, "max_items": max_items})
+        return [{"question": item.question, "answer": item.answer} for item in result.items[:max_items]]
+    except Exception as e:
+        raise QueryError(f"Gagal membuat FAQ: {e}") from e

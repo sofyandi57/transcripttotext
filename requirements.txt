@@ -9,3 +9,4 @@ langchain-text-splitters>=1.1.2
 pinecone>=7.3.0
 fpdf2>=2.8.8
 requests>=2.32.0
+uharfbuzz>=0.40.0

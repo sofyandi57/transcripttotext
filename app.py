@@ -51,6 +51,7 @@ _LANGUAGE_OPTIONS = {
     "Español / Spanish (es)": "es",
     "Français / French (fr)": "fr",
     "العربية / Arabic (ar)": "ar",
+    "فارسی / Persian (fa)": "fa",
     "Tiếng Việt / Vietnamese (vi)": "vi",
     "Melayu / Malay (ms)": "ms",
     "Português / Portuguese (pt)": "pt",

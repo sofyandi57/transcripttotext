@@ -78,7 +78,19 @@ _SCRIPT_FONT_PATHS: dict[str, list[str]] = {
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     ],
+    "arabic": [
+        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf",
+    ],
 }
+
+# Script yang butuh text SHAPING (huruf saling sambung + arah RTL) --
+# beda dari Thai/CJK/Tamil/Devanagari yang cukup ganti font saja. Arab dan
+# Persia (Farsi) sama-sama pakai alfabet Arab, jadi satu font/logic yang
+# sama untuk keduanya. Butuh `uharfbuzz` ter-install (lihat requirements.txt)
+# -- tanpa itu, fpdf2 tetap jalan tapi huruf tampil terpisah-pisah (tidak
+# tersambung) dan urutan kata bisa salah.
+_RTL_SCRIPTS = {"arabic"}
 
 
 def _find_font(paths: list[str]) -> str | None:
@@ -99,7 +111,10 @@ def _detect_script(text: str, threshold: int = 20) -> str | None:
     `threshold`: minimal jumlah karakter script itu supaya tidak salah
     deteksi gara-gara 1-2 karakter nyasar (emoji, dll).
     """
-    counts = {"cjk": 0, "thai": 0, "tamil": 0, "devanagari": 0}
+    # Arab & Persia (Farsi) sama-sama pakai alfabet Arab (Persia nambah
+    # beberapa huruf spt پ چ ژ گ yang tetap masuk blok Unicode Arabic ini),
+    # jadi satu kategori "arabic" untuk keduanya.
+    counts = {"cjk": 0, "thai": 0, "tamil": 0, "devanagari": 0, "arabic": 0}
     for ch in text:
         cp = ord(ch)
         if 0x4E00 <= cp <= 0x9FFF or 0x3040 <= cp <= 0x30FF or 0xAC00 <= cp <= 0xD7A3:
@@ -110,6 +125,8 @@ def _detect_script(text: str, threshold: int = 20) -> str | None:
             counts["tamil"] += 1
         elif 0x0900 <= cp <= 0x097F:
             counts["devanagari"] += 1
+        elif 0x0600 <= cp <= 0x06FF or 0x0750 <= cp <= 0x077F or 0xFB50 <= cp <= 0xFEFF:
+            counts["arabic"] += 1
     dominant = max(counts, key=counts.get)
     return dominant if counts[dominant] >= threshold else None
 
@@ -142,15 +159,24 @@ class _ReportPDF(FPDF):
         self._line(text, 7)
         self.ln(1)
 
-    def body(self, text: str, family: str | None = None):
+    def body(self, text: str, family: str | None = None, rtl: bool = False):
         # `family` override -- dipakai buat bagian transcript kalau script-nya
         # butuh font lain dari default (lihat script_font_name di
         # build_pdf_report). Kalau None, pakai font default seperti biasa.
         # unicode_ok=True karena family override selalu font Unicode yang
         # berhasil di-register (lihat pemanggilnya) -- jangan di-Latin-1-kan.
+        #
+        # `rtl` -- untuk Arab/Persia: huruf harus disambung (shaping) dan
+        # dibaca kanan-ke-kiri. Tanpa ini, huruf tampil terpisah-pisah dan
+        # urutannya salah meski font-nya sudah benar. Dimatikan lagi setelah
+        # section ini supaya tidak memengaruhi teks Indonesia berikutnya.
+        if rtl:
+            self.set_text_shaping(use_shaping_engine=True, direction="rtl")
         self.set_font(family or self.font_family_name, "", 10)
         self._line(text, 5.5, unicode_ok=bool(family))
         self.ln(1)
+        if rtl:
+            self.set_text_shaping(use_shaping_engine=False)
         self.set_font(self.font_family_name, "", 10)  # kembalikan ke default
 
     def caption(self, text: str):
@@ -261,7 +287,11 @@ def build_pdf_report(
     pdf.ln(2)
 
     pdf.h2("Transcript Lengkap")
-    pdf.body(transcript.strip() or "(Transcript kosong.)", family=transcript_font_family)
+    pdf.body(
+        transcript.strip() or "(Transcript kosong.)",
+        family=transcript_font_family,
+        rtl=(script in _RTL_SCRIPTS),
+    )
     pdf.ln(3)
 
     pdf.h2(f"Riwayat Tanya-Jawab ({len(qa_history)})")

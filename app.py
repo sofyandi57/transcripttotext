@@ -48,6 +48,28 @@ def _build_download_filename(narasumber: str, video_id: str, upload_date: str = 
 
 st.set_page_config(page_title="Transcript AI Powerhouse", page_icon="🧠", layout="centered")
 
+# ---------------------------------------------------------------------------
+# Gate password -- sederhana, satu password bersama disimpan di Secrets
+# (APP_PASSWORD), bukan di kode. Kalau APP_PASSWORD tidak diisi, gate ini
+# dilewati sama sekali (app terbuka seperti biasa) -- supaya tidak
+# mengunci diri sendiri kalau lupa/belum sempat setup.
+# ---------------------------------------------------------------------------
+
+app_password = st.secrets.get("APP_PASSWORD", "")
+
+if app_password and not st.session_state.get("authenticated"):
+    st.title("🔒 Login")
+    with st.form("login_form"):
+        password_input = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Masuk", type="primary", use_container_width=True)
+    if submitted:
+        if password_input == app_password:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Password salah.")
+    st.stop()
+
 st.title("🧠 YouTube Transcript AI Powerhouse")
 st.caption("Transcript, ringkasan, dan tanya-jawab video YouTube.")
 

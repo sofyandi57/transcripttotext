@@ -238,9 +238,13 @@ with tab_new:
             # Key di-per-video (bukan statis) -- supaya widget selalu benar-benar
             # baru saat ganti video, dan tidak ada risiko menampilkan isi transcript
             # video SEBELUMNYA gara-gara Streamlit menganggap ini widget yang sama.
+            # Preview pakai versi BERTIMESTAMP juga -- supaya sama persis dengan
+            # isi file yang di-download, tidak bikin bingung ("kok di preview
+            # nggak ada timestamp-nya, di file kok ada").
+            transcript_with_timestamps = format_transcript_with_timestamps(result.segments)
             st.text_area(
                 "Transcript",
-                value=result.full_text,
+                value=transcript_with_timestamps,
                 height=200,
                 key=f"raw_transcript_display_{result.video_id}",
             )
@@ -249,7 +253,7 @@ with tab_new:
             )
             st.download_button(
                 "⬇️ Download .txt",
-                data=format_transcript_with_timestamps(result.segments),
+                data=transcript_with_timestamps,
                 file_name=download_name,
                 mime="text/plain",
                 help="File berisi timestamp [mm:ss] per baris.",

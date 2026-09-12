@@ -426,7 +426,8 @@ with tab_history:
             with st.container(border=True):
                 col1, col2 = st.columns([3, 1])
                 with col1:
-                    st.markdown(f"**{entry.title}**")
+                    video_url = f"https://youtu.be/{entry.video_id}"
+                    st.markdown(f"**[{entry.title}]({video_url})** ↗")
                     st.caption(
                         f"Video ID: `{entry.video_id}` · {entry.language} · "
                         f"{entry.word_count} kata · diproses {entry.processed_at[:10]}"

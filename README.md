@@ -13,7 +13,7 @@ soal isi video -- termasuk video panjang (podcast >1 jam).
 ```
 transcript-app/
 ├── app.py                    # UI Streamlit -- orkestrasi saja, tanpa logika bisnis
-├── transcript_service.py     # Ambil transcript mentah dari YouTube
+├── transcript_service.py     # Ambil transcript & metadata (judul, channel, dll) dari YouTube
 ├── ai_service.py             # Embedding, index ke Pinecone, ringkasan, FAQ, Q&A (RAG)
 ├── report_builder.py         # Generate laporan PDF (ringkasan+FAQ+transcript+Q&A)
 ├── history_store.py          # Metadata riwayat video (judul, dll) -- JSON lokal
@@ -93,6 +93,14 @@ supaya Streamlit Cloud otomatis install font itu lewat apt. Development
 lokal (terutama Mac) biasanya tidak punya font ini di path yang dicari
 `report_builder.py` -- PDF tetap jadi, cuma karakter spesial itu jadi "?".
 
+### 5. Judul/metadata video otomatis butuh API key TERPISAH (opsional)
+Judul video, nama channel, durasi, jumlah views, tanggal upload asli, dan
+deskripsi diambil lewat **YouTube Data API v3** -- ini API key BEDA dari
+Gemini/Groq/Pinecone, dari **Google Cloud Console** (bukan Google AI
+Studio). Tanpa `YOUTUBE_API_KEY`, app tetap jalan normal: judul pakai input
+manual (atau video ID kalau kosong), nama file download pakai tanggal saat
+diproses (bukan tanggal upload asli), dan tidak ada info channel/durasi/views.
+
 ---
 
 ## Setup Lokal (development)
@@ -129,7 +137,16 @@ pip install -r requirements.txt
 3. Index akan **dibuat otomatis oleh aplikasi** saat pertama kali dipakai
    (region dikunci ke `us-east-1` -- ini wajib untuk free tier)
 
-### E. Isi kredensial
+### E. Setup YouTube Data API Key -- opsional, untuk judul/metadata otomatis
+
+1. Buka [console.cloud.google.com](https://console.cloud.google.com)
+2. Buat/pilih project → **APIs & Services** → **Library** → cari
+   **"YouTube Data API v3"** → **Enable**
+3. **Credentials** → **Create Credentials** → **API Key**
+4. Skip langkah ini kalau tidak perlu -- lihat batasan #5 di atas untuk apa
+   yang berubah tanpa key ini
+
+### F. Isi kredensial
 
 ```bash
 cp .streamlit/secrets.toml.example .streamlit/secrets.toml
@@ -137,9 +154,9 @@ cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 
 Edit `.streamlit/secrets.toml`, isi minimal `GOOGLE_API_KEY`, `GROQ_API_KEY`,
 `PINECONE_API_KEY`, dan kredensial proxy (lihat template di file itu untuk
-detail `PROXY_HOST`/`PROXY_PORT` opsional).
+detail `PROXY_HOST`/`PROXY_PORT` opsional, dan `YOUTUBE_API_KEY` opsional).
 
-### F. Jalankan
+### G. Jalankan
 
 ```bash
 streamlit run app.py
@@ -163,6 +180,8 @@ streamlit run app.py
    # Opsional -- hanya kalau proxy kamu IP statis, lihat batasan #1
    PROXY_HOST = "ip-proxy-asli"
    PROXY_PORT = "port-proxy-asli"
+   # Opsional -- judul/metadata video otomatis, lihat batasan #5
+   YOUTUBE_API_KEY = "youtube-data-api-key-asli"
    ```
 5. **Save**. App restart otomatis dan langsung baca secrets ini.
 
@@ -174,7 +193,13 @@ tidak pernah melihat atau mengisi API key apa pun** di UI.
 ## Cara pakai
 
 1. Tab **"📼 Video Baru"** → paste URL/ID video YouTube → **Ambil Transcript**
-2. (Opsional) isi Judul & Narasumber -- Narasumber jadi nama file saat download
+   (kalau `YOUTUBE_API_KEY` diisi, judul/channel/durasi/views/deskripsi
+   otomatis muncul -- tidak perlu isi manual)
+2. (Opsional) isi Judul & Narasumber -- Judul manual selalu menang atas judul
+   otomatis kalau diisi; Narasumber jadi nama file saat download. Buka
+   expander **"📄 Transcript"** → **"⬇️ Download .txt"** untuk file transcript
+   dengan timestamp `[mm:ss]` per baris (nama file pakai tanggal upload asli
+   video kalau `YOUTUBE_API_KEY` diisi, kalau tidak pakai tanggal proses)
 3. Klik **"🔎 Index untuk Q&A"** (sekali per video -- kalau video sudah
    pernah di-index sebelumnya, app otomatis mendeteksi dan skip langkah ini)
 4. Klik **"Buat Ringkasan"** untuk ringkasan otomatis
@@ -209,4 +234,6 @@ tidak pernah melihat atau mengisi API key apa pun** di UI.
 | Groq error "model not found"/"decommissioned" | Groq mematikan/mengganti lineup model | Update `DEFAULT_CHAT_MODEL` di `ai_service.py` -- cek [console.groq.com/docs/models](https://console.groq.com/docs/models) |
 | FAQ gagal, error "tool_use_failed"/JSON tidak valid | Model kesulitan structured output lewat function-calling | Sudah ditangani lewat `method="json_schema"` (constrained decoding) di `generate_faq()` -- kalau masih terjadi, cek model yang dipakai mendukung Groq Structured Output API |
 | Karakter aneh ("?") di PDF | Font Unicode tidak ketemu di server | Pastikan `packages.txt` (`fonts-dejavu-core`) ikut ke-push ke GitHub -- Streamlit Cloud install otomatis saat deploy |
+| Ringkasan/FAQ gagal "Request too large ... tokens per minute (TPM)" | Kuota TPM free tier Groq (kecil, rolling per menit) habis karena beberapa aksi AI beruntun | Sudah ditangani otomatis lewat retry+backoff dan map-reduce chunking di `ai_service.py` -- kalau masih gagal setelah 3x retry, tunggu sebentar lalu coba lagi manual |
+| Judul/metadata video tidak muncul otomatis | `YOUTUBE_API_KEY` belum diisi, atau lookup gagal (quota habis/video tidak ditemukan) | Cek Secrets ada `YOUTUBE_API_KEY` yang valid -- ini opsional, app tetap jalan tanpanya (fallback ke judul manual & tanggal proses) |
 | Riwayat kosong padahal sudah pernah proses | Streamlit Cloud reset storage lokal | Masukkan ulang video ID yang sama -- sistem deteksi otomatis lewat Pinecone namespace |

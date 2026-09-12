@@ -25,22 +25,25 @@ from transcript_service import (
     VideoNotFoundError,
     build_proxy_config,
     extract_video_id,
+    format_transcript_with_timestamps,
     get_transcript,
+    get_video_metadata,
     list_available_languages,
 )
 
 
-def _build_download_filename(narasumber: str, video_id: str, ext: str = "txt") -> str:
+def _build_download_filename(narasumber: str, video_id: str, upload_date: str = "", ext: str = "txt") -> str:
     """
-    Nama file download: narasumber_tanggal-proses.ext. Kalau narasumber
-    kosong, fallback ke video_id supaya tetap unik. Tanggal yang dipakai
-    adalah tanggal saat transcript ini diproses di app (bukan tanggal
-    upload asli video -- itu butuh integrasi terpisah ke YouTube Data API).
+    Nama file download: narasumber_tanggal.ext. Kalau narasumber kosong,
+    fallback ke video_id supaya tetap unik. Tanggal yang dipakai adalah
+    tanggal upload ASLI video (dari YouTube Data API, kalau tersedia) --
+    fallback ke tanggal proses hari ini kalau YOUTUBE_API_KEY tidak diisi
+    atau lookup-nya gagal.
     """
     slug_source = narasumber.strip() or video_id
     slug = re.sub(r"[^\w\-]+", "_", slug_source).strip("_") or video_id
-    today = date.today().isoformat()
-    return f"{slug}_{today}.{ext}"
+    tanggal = upload_date or date.today().isoformat()
+    return f"{slug}_{tanggal}.{ext}"
 
 
 st.set_page_config(page_title="Transcript AI Powerhouse", page_icon="🧠", layout="centered")
@@ -59,6 +62,7 @@ st.caption("Transcript, ringkasan, dan tanya-jawab video YouTube.")
 google_api_key = st.secrets.get("GOOGLE_API_KEY", "")   # embedding saja (Pinecone)
 groq_api_key = st.secrets.get("GROQ_API_KEY", "")        # ringkasan & Q&A
 pinecone_api_key = st.secrets.get("PINECONE_API_KEY", "")
+youtube_api_key = st.secrets.get("YOUTUBE_API_KEY", "")  # opsional -- judul/metadata otomatis
 
 webshare_username = st.secrets.get("WEBSHARE_USERNAME", "")
 webshare_password = st.secrets.get("WEBSHARE_PASSWORD", "")
@@ -83,6 +87,7 @@ with st.sidebar:
     st.write("Groq:", "✅" if groq_api_key else "❌")
     st.write("Pinecone:", "✅" if pinecone_api_key else "❌")
     st.write("Proxy:", "✅" if proxy_config else "❌")
+    st.write("YouTube Data API:", "✅" if youtube_api_key else "➖ opsional")
 
 missing_warnings = []
 if not proxy_config:
@@ -158,6 +163,7 @@ with tab_new:
         st.session_state.pop("current_summary", None)
         st.session_state.pop("current_faq", None)
         st.session_state.pop("current_pdf", None)
+        st.session_state.pop("current_metadata", None)
         st.session_state.pop("qa_history", None)
         st.session_state.pop(f"qa_question_input_{fv}", None)
         st.session_state["form_version"] = fv + 1
@@ -171,6 +177,7 @@ with tab_new:
         st.session_state.pop("current_summary", None)
         st.session_state.pop("current_faq", None)
         st.session_state.pop("current_pdf", None)
+        st.session_state.pop("current_metadata", None)
 
         if not url_input.strip():
             st.error("Isi URL/ID video dulu.")
@@ -183,6 +190,9 @@ with tab_new:
                         url_input, preferred_langs=preferred_langs, proxy_config=proxy_config
                     )
                     st.session_state["current_result"] = result
+                    st.session_state["current_metadata"] = get_video_metadata(
+                        result.video_id, youtube_api_key
+                    )
                     st.success(
                         f"Transcript berhasil diambil. Bahasa: **{result.language}** · "
                         f"{result.word_count} kata"
@@ -208,6 +218,21 @@ with tab_new:
     # Kalau transcript sudah berhasil diambil, tampilkan opsi lanjutan
     if "current_result" in st.session_state:
         result = st.session_state["current_result"]
+        metadata = st.session_state.get("current_metadata")
+
+        # Judul efektif: input manual > judul otomatis dari YouTube > video_id.
+        # Dipakai konsisten untuk riwayat, nama file, dan laporan PDF.
+        effective_title = video_title.strip() or (metadata.title if metadata else "") or result.video_id
+
+        if metadata:
+            st.markdown(f"**{metadata.title}**")
+            st.caption(
+                f"{metadata.channel_title} · {metadata.duration_display} · "
+                f"{metadata.view_count:,} views · diupload {metadata.published_at}".replace(",", ".")
+            )
+            if metadata.description:
+                with st.expander("Deskripsi video"):
+                    st.text(metadata.description)
 
         with st.expander("📄 Transcript"):
             # Key di-per-video (bukan statis) -- supaya widget selalu benar-benar
@@ -219,12 +244,15 @@ with tab_new:
                 height=200,
                 key=f"raw_transcript_display_{result.video_id}",
             )
-            download_name = _build_download_filename(narasumber, result.video_id)
+            download_name = _build_download_filename(
+                narasumber, result.video_id, upload_date=metadata.published_at if metadata else ""
+            )
             st.download_button(
                 "⬇️ Download .txt",
-                data=result.full_text,
+                data=format_transcript_with_timestamps(result.segments),
                 file_name=download_name,
                 mime="text/plain",
+                help="File berisi timestamp [mm:ss] per baris.",
             )
 
         st.divider()
@@ -250,7 +278,7 @@ with tab_new:
                             hs.add_entry(
                                 video_id=result.video_id,
                                 namespace=ns_info.namespace,
-                                title=video_title.strip() or result.video_id,
+                                title=effective_title,
                                 language=result.language,
                                 word_count=result.word_count,
                             )
@@ -337,10 +365,11 @@ with tab_new:
             st.subheader("📄 Laporan PDF")
             if st.button("Buat PDF", use_container_width=True):
                 pdf_bytes = report_builder.build_pdf_report(
-                    title=video_title.strip() or result.video_id,
+                    title=effective_title,
                     video_id=result.video_id,
                     language=result.language,
                     word_count=result.word_count,
+                    metadata=metadata,
                     summary=st.session_state.get("current_summary"),
                     transcript=result.full_text,
                     faq_items=st.session_state.get("current_faq", []),
@@ -352,7 +381,9 @@ with tab_new:
                 st.download_button(
                     "⬇️ Download PDF",
                     data=st.session_state["current_pdf"],
-                    file_name=_build_download_filename(narasumber, result.video_id, ext="pdf"),
+                    file_name=_build_download_filename(
+                        narasumber, result.video_id, upload_date=metadata.published_at if metadata else "", ext="pdf"
+                    ),
                     mime="application/pdf",
                     use_container_width=True,
                 )

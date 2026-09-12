@@ -26,6 +26,8 @@ from datetime import date
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 
+from transcript_service import VideoMetadata
+
 # Path standar DejaVu Sans di Debian/Ubuntu (dipasang lewat packages.txt).
 _DEJAVU_REGULAR_PATHS = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -94,6 +96,7 @@ def build_pdf_report(
     transcript: str,
     faq_items: list[dict],
     qa_history: list[dict],
+    metadata: VideoMetadata | None = None,
 ) -> bytes:
     """
     Susun laporan PDF satu video.
@@ -101,11 +104,14 @@ def build_pdf_report(
     Parameters
     ----------
     title : judul video (atau video_id kalau tidak diisi)
-    video_id, language, word_count : metadata video
+    video_id, language, word_count : metadata video dari transcript
     summary : hasil ringkasan (bisa None kalau belum pernah dibuat)
     transcript : isi transcript penuh
     faq_items : list of {"question": str, "answer": str} (FAQ otomatis)
     qa_history : list of {"question": str, "answer": str} (tanya-jawab manual)
+    metadata : VideoMetadata dari YouTube Data API (opsional -- None kalau
+        YOUTUBE_API_KEY tidak diisi/lookup gagal) -- channel, tanggal upload
+        asli, durasi, views, deskripsi.
 
     Returns
     -------
@@ -128,10 +134,22 @@ def build_pdf_report(
     pdf.add_page()
 
     pdf.h1(title or video_id)
-    pdf.caption(
-        f"Video ID: {video_id}  |  Bahasa: {language}  |  {word_count} kata  |  "
-        f"Laporan dibuat: {date.today().isoformat()}"
-    )
+
+    caption_parts = [f"Video ID: {video_id}", f"Bahasa: {language}", f"{word_count} kata"]
+    if metadata:
+        caption_parts += [
+            f"Channel: {metadata.channel_title}",
+            f"Durasi: {metadata.duration_display}",
+            f"{metadata.view_count:,} views".replace(",", "."),
+            f"Diupload: {metadata.published_at}",
+        ]
+    caption_parts.append(f"Laporan dibuat: {date.today().isoformat()}")
+    pdf.caption("  |  ".join(caption_parts))
+
+    if metadata and metadata.description:
+        pdf.ln(1)
+        pdf.caption(f"Deskripsi: {metadata.description}")
+
     pdf.ln(3)
 
     pdf.h2("Ringkasan")

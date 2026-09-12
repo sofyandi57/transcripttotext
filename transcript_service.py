@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+import requests
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     NoTranscriptFound,
@@ -266,3 +267,102 @@ def list_available_languages(url_or_id: str, proxy_config=None) -> list[dict]:
         }
         for t in transcript_list
     ]
+
+
+# ---------------------------------------------------------------------------
+# Format transcript dengan timestamp (untuk file download -- BUKAN untuk
+# dikirim ke AI. Timestamp per baris cuma menambah noise/token buat LLM
+# tanpa manfaat untuk ringkasan/FAQ/Q&A, jadi result.full_text yang polos
+# tetap dipakai di ai_service.py; ini murni untuk keperluan baca manusia.)
+# ---------------------------------------------------------------------------
+
+def _format_seconds(total_seconds: float) -> str:
+    total_seconds = int(total_seconds)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+def format_transcript_with_timestamps(segments: list[dict]) -> str:
+    """Ubah segments (dari TranscriptResult.segments) jadi teks '[mm:ss] isi' per baris."""
+    return "\n".join(f"[{_format_seconds(seg['start'])}] {seg['text']}" for seg in segments)
+
+
+# ---------------------------------------------------------------------------
+# Metadata video via YouTube Data API v3 -- OPSIONAL. Beda dari
+# youtube-transcript-api (yang ambil transcript tanpa API key resmi), ini
+# butuh API key terpisah dari Google Cloud Console (bukan Google AI Studio).
+# Kegagalan di sini (key kosong, quota habis, video tidak ditemukan) TIDAK
+# BOLEH menghentikan alur utama -- transcript tetap harus bisa diambil tanpa
+# metadata ini, makanya fungsi ini return None alih-alih raise exception.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class VideoMetadata:
+    title: str
+    channel_title: str
+    published_at: str       # "YYYY-MM-DD", tanggal upload ASLI di YouTube
+    duration_display: str   # "19:32" atau "1:02:10"
+    view_count: int
+    description: str        # dipotong pendek, lihat _MAX_DESCRIPTION_CHARS
+
+
+_MAX_DESCRIPTION_CHARS = 280
+
+
+def _parse_iso8601_duration(duration: str) -> str:
+    """Ubah durasi ISO 8601 dari YouTube (mis. 'PT1H2M10S') jadi 'h:mm:ss'/'mm:ss'."""
+    match = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration or "")
+    if not match:
+        return "0:00"
+    hours, minutes, seconds = (int(g) if g else 0 for g in match.groups())
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+def get_video_metadata(video_id: str, youtube_api_key: str) -> VideoMetadata | None:
+    """
+    Ambil judul, nama channel, tanggal upload asli, durasi, jumlah views,
+    dan deskripsi singkat lewat YouTube Data API v3. Return None kalau key
+    kosong atau request gagal apa pun sebabnya (fitur ini best-effort).
+    """
+    if not youtube_api_key:
+        return None
+
+    try:
+        response = requests.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={
+                "id": video_id,
+                "part": "snippet,contentDetails,statistics",
+                "key": youtube_api_key,
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        items = response.json().get("items", [])
+        if not items:
+            return None
+
+        item = items[0]
+        snippet = item.get("snippet", {})
+        content_details = item.get("contentDetails", {})
+        statistics = item.get("statistics", {})
+
+        description = (snippet.get("description") or "").strip()
+        if len(description) > _MAX_DESCRIPTION_CHARS:
+            description = description[:_MAX_DESCRIPTION_CHARS].rstrip() + "..."
+
+        return VideoMetadata(
+            title=snippet.get("title", ""),
+            channel_title=snippet.get("channelTitle", ""),
+            published_at=(snippet.get("publishedAt") or "")[:10],
+            duration_display=_parse_iso8601_duration(content_details.get("duration", "")),
+            view_count=int(statistics.get("viewCount", 0)),
+            description=description,
+        )
+    except Exception:
+        return None

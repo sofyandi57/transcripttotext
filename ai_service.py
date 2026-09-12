@@ -62,6 +62,15 @@ EMBEDDING_DIMENSION = 768  # Matryoshka: bisa 3072/1536/768. 768 dipilih untuk h
 # Urutan dipilih dari yang paling mirip kualitasnya ke DEFAULT_CHAT_MODEL.
 FALLBACK_CHAT_MODELS = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
 
+# Semua model gpt-oss di atas adalah REASONING model -- mereka diam-diam
+# memakai sebagian max_tokens untuk "reasoning_tokens" (chain-of-thought
+# internal) SEBELUM menulis jawaban asli. Kalau reasoning kebagian jatah
+# terlalu banyak, jawaban/JSON asli terpotong duluan -> untuk FAQ ini
+# muncul sebagai error Groq "json_validate_failed" dengan failed_generation
+# kosong (dikonfirmasi lewat tes langsung ke API: max_tokens=150 habis
+# semua 148-nya buat reasoning, content jadi ""). Setiap ChatGroq(...) di
+# bawah WAJIB pakai reasoning_effort="low" untuk mencegah ini.
+
 PINECONE_INDEX_NAME = "youtube-transcript-rag"
 PINECONE_CLOUD = "aws"
 PINECONE_REGION = "us-east-1"  # wajib us-east-1 untuk free tier ("Starter") Pinecone
@@ -518,7 +527,7 @@ def summarize_transcript(
 
     def _build(prompt):
         def _fn(model):
-            llm = ChatGroq(model=model, api_key=groq_api_key, temperature=0.3, max_tokens=1500)
+            llm = ChatGroq(model=model, api_key=groq_api_key, temperature=0.3, max_tokens=2000, reasoning_effort="low")
             return prompt | llm
         return _fn
 
@@ -581,7 +590,7 @@ def translate_transcript(
     def _build(model):
         # max_tokens lebih besar dari ringkasan/FAQ -- output terjemahan
         # panjangnya kira-kira sama dengan input chunk, bukan versi padat.
-        llm = ChatGroq(model=model, api_key=groq_api_key, temperature=0.2, max_tokens=3000)
+        llm = ChatGroq(model=model, api_key=groq_api_key, temperature=0.2, max_tokens=3500, reasoning_effort="low")
         return _TRANSLATE_PROMPT | llm
 
     try:
@@ -664,7 +673,7 @@ def ask_question(
         context = "\n\n---\n\n".join(doc.page_content for doc in relevant_docs)
 
         def _build(model):
-            llm = ChatGroq(model=model, api_key=groq_api_key, temperature=0.2, max_tokens=1000)
+            llm = ChatGroq(model=model, api_key=groq_api_key, temperature=0.2, max_tokens=1500, reasoning_effort="low")
             return _QA_PROMPT | llm
 
         response = _invoke_resilient(_build, {"context": context, "question": question}, chat_model)
@@ -749,7 +758,7 @@ def generate_faq(
 
     def _build(prompt):
         def _fn(model):
-            llm = ChatGroq(model=model, api_key=groq_api_key, temperature=0.3, max_tokens=2000)
+            llm = ChatGroq(model=model, api_key=groq_api_key, temperature=0.3, max_tokens=3000, reasoning_effort="low")
             return prompt | llm.with_structured_output(_FAQList, method="json_schema")
         return _fn
 

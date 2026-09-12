@@ -34,6 +34,7 @@ untuk Gemini cek https://ai.google.dev/gemini-api/docs/models.
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -62,6 +63,19 @@ CHUNK_SIZE = 1500
 CHUNK_OVERLAP = 200
 
 MAX_FAQ_ITEMS = 10
+
+# Free tier Groq membatasi TPM (token per menit) cukup kecil (terlihat ~8000
+# di akun yang dites, tapi bisa beda per akun/model) -- ini rolling/leaky
+# bucket, BUKAN hard reset tiap menit, jadi retry singkat setelah delay
+# pendek biasanya cukup untuk lolos. Transcript yang lebih besar dari
+# SUMMARY_CHUNK_SIZE karakter (~3000 token) diproses map-reduce (potong,
+# ringkas per bagian, gabung) supaya TIDAK PERNAH melebihi TPM dalam satu
+# request, berapa pun panjang videonya (podcast 1-2 jam sekalipun).
+SUMMARY_CHUNK_SIZE = 12000
+SUMMARY_CHUNK_OVERLAP = 300
+
+RATE_LIMIT_MAX_RETRIES = 3
+RATE_LIMIT_BASE_DELAY_SECONDS = 6
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +133,42 @@ def _extract_text(content) -> str:
                 parts.append(block["text"])
         return "".join(parts)
     return str(content)
+
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    """Deteksi error TPM/rate-limit Groq (413 'tokens' atau 429) dari pesan exception."""
+    msg = str(e).lower()
+    return "rate_limit_exceeded" in msg or "429" in msg or ("413" in msg and "token" in msg)
+
+
+def _invoke_with_retry(chain, payload: dict):
+    """
+    Panggil chain.invoke() dengan retry singkat kalau kena rate limit Groq.
+    TPM Groq adalah rolling/leaky bucket (pulih dalam hitungan detik, bukan
+    nunggu genap satu menit) -- jadi delay pendek + retry biasanya cukup,
+    terutama kalau sebelumnya ada beberapa panggilan AI beruntun (ringkasan,
+    FAQ, Q&A) yang menghabiskan kuota menit itu.
+    """
+    last_error: Exception | None = None
+    for attempt in range(RATE_LIMIT_MAX_RETRIES):
+        try:
+            return chain.invoke(payload)
+        except Exception as e:
+            last_error = e
+            if _is_rate_limit_error(e) and attempt < RATE_LIMIT_MAX_RETRIES - 1:
+                time.sleep(RATE_LIMIT_BASE_DELAY_SECONDS * (attempt + 1))
+                continue
+            raise
+    raise last_error  # pragma: no cover -- selalu return atau raise di dalam loop
+
+
+def _split_for_llm(text: str) -> list[str]:
+    """Potong teks jadi bagian <= SUMMARY_CHUNK_SIZE karakter untuk map-reduce."""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=SUMMARY_CHUNK_SIZE,
+        chunk_overlap=SUMMARY_CHUNK_OVERLAP,
+    )
+    return splitter.split_text(text)
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +411,15 @@ _SUMMARY_PROMPT = ChatPromptTemplate.from_messages([
      "Transcript:\n{transcript}"),
 ])
 
+_SUMMARY_MAP_PROMPT = ChatPromptTemplate.from_messages([
+    ("system",
+     "Kamu meringkas SATU BAGIAN (bukan keseluruhan) dari transcript video yang "
+     "lebih panjang. Ringkas bagian ini secara padat, pertahankan semua detail "
+     "penting -- ringkasan ini akan digabung dengan bagian lain untuk membuat "
+     "ringkasan akhir. Jangan menambahkan informasi di luar teks ini."),
+    ("human", "Bagian transcript:\n{chunk}"),
+])
+
 
 def summarize_transcript(
     full_text: str,
@@ -368,21 +427,36 @@ def summarize_transcript(
     chat_model: str = DEFAULT_CHAT_MODEL,
 ) -> str:
     """
-    Ringkas transcript lewat Groq. Untuk video panjang (>1 jam), transcript
-    bisa 15.000-25.000+ kata -- model Groq default (Llama 3.3 70B) punya
-    context window 128K token, cukup untuk sebagian besar video tanpa perlu
-    chunking (beda dengan indexing, yang memang perlu di-chunk untuk
-    retrieval presisi). Video YANG SANGAT panjang (>~2.5 jam) bisa melebihi
-    ini -- kalau muncul error context length, itu tandanya.
+    Ringkas transcript lewat Groq. Free tier Groq membatasi TPM (token per
+    menit) cukup kecil -- transcript video panjang (podcast 1-2 jam, bisa
+    15.000-25.000+ kata) TIDAK MUAT dikirim sekaligus dalam satu request.
+    Kalau transcript lebih panjang dari SUMMARY_CHUNK_SIZE karakter, dipotong
+    lalu diringkas per-bagian (map), baru ringkasan-ringkasan itu digabung
+    jadi satu ringkasan akhir (reduce) -- pola map-reduce standar, memastikan
+    setiap request individual selalu di bawah limit TPM berapa pun panjang
+    videonya.
     """
     if not groq_api_key:
         raise ConfigurationError("GROQ_API_KEY harus diisi untuk membuat ringkasan.")
 
     try:
-        llm = ChatGroq(model=chat_model, api_key=groq_api_key, temperature=0.3)
-        chain = _SUMMARY_PROMPT | llm
-        response = chain.invoke({"transcript": full_text})
-        return _extract_text(response.content)
+        llm = ChatGroq(model=chat_model, api_key=groq_api_key, temperature=0.3, max_tokens=1500)
+
+        if len(full_text) <= SUMMARY_CHUNK_SIZE:
+            chain = _SUMMARY_PROMPT | llm
+            response = _invoke_with_retry(chain, {"transcript": full_text})
+            return _extract_text(response.content)
+
+        chunks = _split_for_llm(full_text)
+        map_chain = _SUMMARY_MAP_PROMPT | llm
+        partial_summaries = [
+            _extract_text(_invoke_with_retry(map_chain, {"chunk": chunk}).content) for chunk in chunks
+        ]
+
+        combined = "\n\n".join(partial_summaries)
+        reduce_chain = _SUMMARY_PROMPT | llm
+        final_response = _invoke_with_retry(reduce_chain, {"transcript": combined})
+        return _extract_text(final_response.content)
     except Exception as e:
         raise QueryError(f"Gagal membuat ringkasan: {e}") from e
 
@@ -452,9 +526,9 @@ def ask_question(
 
         context = "\n\n---\n\n".join(doc.page_content for doc in relevant_docs)
 
-        llm = ChatGroq(model=chat_model, api_key=groq_api_key, temperature=0.2)
+        llm = ChatGroq(model=chat_model, api_key=groq_api_key, temperature=0.2, max_tokens=1000)
         chain = _QA_PROMPT | llm
-        response = chain.invoke({"context": context, "question": question})
+        response = _invoke_with_retry(chain, {"context": context, "question": question})
 
         return {
             "answer": _extract_text(response.content),
@@ -490,6 +564,24 @@ _FAQ_PROMPT = ChatPromptTemplate.from_messages([
      "Buat maksimal {max_items} FAQ dari transcript video berikut:\n\n{transcript}"),
 ])
 
+_FAQ_MAP_PROMPT = ChatPromptTemplate.from_messages([
+    ("system",
+     "Kamu membuat draft FAQ dari SATU BAGIAN (bukan keseluruhan) transcript video "
+     "yang lebih panjang. Pilih maksimal 4 pertanyaan paling penting yang relevan "
+     "dengan bagian ini saja. Jawaban HARUS berdasarkan teks ini saja -- jangan "
+     "mengarang. Jawab dalam Bahasa Indonesia kecuali diminta lain."),
+    ("human", "Bagian transcript:\n{chunk}"),
+])
+
+_FAQ_REDUCE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system",
+     "Kamu diberi kumpulan draft FAQ dari berbagai bagian sebuah video. Pilih "
+     "maksimal {max_items} yang PALING penting dan relevan untuk keseluruhan "
+     "video, gabungkan/hilangkan yang duplikat atau mirip. Boleh menghaluskan "
+     "kalimat, tapi jangan ubah makna atau mengarang fakta baru di luar draft."),
+    ("human", "Draft FAQ:\n{drafts}"),
+])
+
 
 def generate_faq(
     full_text: str,
@@ -499,26 +591,43 @@ def generate_faq(
 ) -> list[dict]:
     """
     Buat daftar FAQ (maksimal `max_items`) dari transcript, lewat Groq
-    structured output (function calling) supaya hasilnya list Q&A yang
-    rapi, bukan teks bebas yang perlu di-parse manual.
+    Structured Output API (method="json_schema" -- constrained decoding,
+    output DIJAMIN sesuai schema; default "function_calling" pernah
+    menghasilkan JSON tidak valid untuk daftar sepanjang ini).
+
+    Transcript yang lebih panjang dari SUMMARY_CHUNK_SIZE karakter diproses
+    map-reduce sama seperti summarize_transcript(): draft FAQ dibuat per
+    bagian (map), lalu satu panggilan terakhir memilih/menggabung draft
+    terbaik (reduce) -- supaya tidak pernah melebihi limit TPM Groq berapa
+    pun panjang videonya.
 
     Returns
     -------
-    list of {"question": str, "answer": str}, maksimal `max_items` item
-    (model kadang mengabaikan batas jumlah di prompt -- dipotong manual
-    di sini sebagai jaminan).
+    list of {"question": str, "answer": str}, maksimal `max_items` item.
     """
     if not groq_api_key:
         raise ConfigurationError("GROQ_API_KEY harus diisi untuk membuat FAQ.")
 
     try:
-        llm = ChatGroq(model=chat_model, api_key=groq_api_key, temperature=0.3)
-        # method="json_schema" -- Groq's dedicated Structured Output API (constrained
-        # decoding, output DIJAMIN sesuai schema). Default "function_calling" pernah
-        # menghasilkan JSON tidak valid (tool_use_failed) untuk daftar sepanjang ini.
+        llm = ChatGroq(model=chat_model, api_key=groq_api_key, temperature=0.3, max_tokens=2000)
         structured_llm = llm.with_structured_output(_FAQList, method="json_schema")
-        chain = _FAQ_PROMPT | structured_llm
-        result: _FAQList = chain.invoke({"transcript": full_text, "max_items": max_items})
-        return [{"question": item.question, "answer": item.answer} for item in result.items[:max_items]]
+
+        if len(full_text) <= SUMMARY_CHUNK_SIZE:
+            chain = _FAQ_PROMPT | structured_llm
+            result: _FAQList = _invoke_with_retry(chain, {"transcript": full_text, "max_items": max_items})
+            return [{"question": item.question, "answer": item.answer} for item in result.items[:max_items]]
+
+        chunks = _split_for_llm(full_text)
+        map_chain = _FAQ_MAP_PROMPT | structured_llm
+        drafts: list[str] = []
+        for chunk in chunks:
+            partial: _FAQList = _invoke_with_retry(map_chain, {"chunk": chunk})
+            drafts.extend(f"Q: {item.question}\nA: {item.answer}" for item in partial.items)
+
+        reduce_chain = _FAQ_REDUCE_PROMPT | structured_llm
+        final: _FAQList = _invoke_with_retry(
+            reduce_chain, {"drafts": "\n\n".join(drafts), "max_items": max_items}
+        )
+        return [{"question": item.question, "answer": item.answer} for item in final.items[:max_items]]
     except Exception as e:
         raise QueryError(f"Gagal membuat FAQ: {e}") from e

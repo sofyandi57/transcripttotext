@@ -40,7 +40,9 @@ transcript-app/
 ├── ai_service.py             # Embedding, index ke Pinecone, ringkasan, FAQ, terjemahan, Q&A (RAG)
 ├── report_builder.py         # Generate laporan PDF (ringkasan+FAQ+transcript+terjemahan+Q&A)
 ├── history_store.py          # Metadata riwayat video (judul, dll) -- JSON lokal
+├── mcp_server.py              # Server MCP -- pakai fitur ini langsung dari chat Claude
 ├── requirements.txt
+├── requirements-mcp.txt      # Dependency tambahan khusus mcp_server.py
 ├── packages.txt              # Apt package (font Unicode + ffmpeg) -- Streamlit Cloud
 ├── .streamlit/
 │   └── secrets.toml.example  # Template -- BUKAN secret asli
@@ -290,6 +292,93 @@ streamlit run app.py
 
 Semua key di atas dikelola pengelola app lewat Secrets -- **pengunjung app
 tidak pernah melihat atau mengisi API key apa pun** di UI.
+
+---
+
+## MCP Server (ngobrol lewat Claude, tanpa buka Streamlit)
+
+Selain lewat UI Streamlit, semua fitur (ambil transcript, Whisper, ringkasan,
+FAQ, terjemahan, Q&A, riwayat) juga bisa dipakai langsung dari **percakapan
+Claude** (Claude Desktop atau Claude Code) lewat `mcp_server.py` -- server MCP
+([Model Context Protocol](https://modelcontextprotocol.io)) yang membungkus
+`transcript_service.py`/`ai_service.py`/`audio_service.py`/`history_store.py`
+apa adanya (modul-modul ini memang sudah tidak bergantung pada Streamlit sama
+sekali -- semua kredensial lewat parameter fungsi -- jadi bisa dipanggil
+langsung tanpa perubahan kode).
+
+**Tools yang tersedia:**
+
+| Tool | Fungsi |
+|---|---|
+| `fetch_transcript` | Ambil transcript dari caption YouTube |
+| `transcribe_with_whisper` | Fallback: transkripsi dari audio (video tanpa caption) |
+| `list_transcript_languages` | Lihat bahasa caption yang tersedia |
+| `summarize` | Ringkasan otomatis |
+| `generate_faq` | FAQ otomatis (maks. N item) |
+| `translate` | Terjemahan transcript penuh ke Indonesia/Inggris |
+| `index_for_qa` | Index transcript ke Pinecone (sekali per video, untuk Q&A) |
+| `ask_question` | Tanya-jawab bebas soal isi video (RAG) |
+| `get_transcript_text` | Ambil isi transcript penuh/dengan timestamp |
+| `list_history` | Lihat riwayat video yang pernah diproses |
+
+### Setup
+
+1. Install dependency tambahan (terpisah dari `requirements.txt` utama,
+   supaya deployment Streamlit tidak ikut membawa package yang tidak dipakai):
+   ```bash
+   pip install -r requirements-mcp.txt
+   ```
+2. Buka config MCP client kamu:
+   - **Claude Desktop**: menu **Settings → Developer → Edit Config**
+     (atau langsung edit `~/Library/Application Support/Claude/claude_desktop_config.json`
+     di Mac)
+   - **Claude Code**: `claude mcp add` (lihat `claude mcp add --help`), atau
+     edit config MCP project/user secara manual
+3. Tambahkan entry berikut (sesuaikan `command` dengan path Python di
+   virtualenv-mu, dan `args` dengan path lengkap ke `mcp_server.py`):
+   ```json
+   {
+     "mcpServers": {
+       "youtube-transcript-ai": {
+         "command": "/path/ke/transcript-app/.venv/bin/python",
+         "args": ["/path/ke/transcript-app/mcp_server.py"],
+         "env": {
+           "GOOGLE_API_KEY": "google-api-key-asli",
+           "GROQ_API_KEY": "groq-api-key-asli",
+           "PINECONE_API_KEY": "pinecone-api-key-asli",
+           "WEBSHARE_USERNAME": "username-proxy-asli",
+           "WEBSHARE_PASSWORD": "password-proxy-asli",
+           "YOUTUBE_API_KEY": "youtube-data-api-key-asli"
+         }
+       }
+     }
+   }
+   ```
+   `YOUTUBE_API_KEY`, `PROXY_HOST`/`PROXY_PORT` opsional -- sama seperti di
+   Streamlit (lihat template `.streamlit/secrets.toml.example` untuk arti
+   masing-masing key). Server ini berjalan sebagai proses lokal terpisah
+   lewat stdio, bukan lewat internet -- kredensial di atas tidak pernah
+   terkirim ke server pihak ketiga mana pun selain API resmi (Groq/Gemini/
+   Pinecone/YouTube) yang memang sudah dipakai fitur ini.
+4. Restart Claude Desktop/Code. Cek tool `youtube-transcript-ai` muncul di
+   daftar tools/MCP servers yang aktif.
+5. Coba langsung di chat, misalnya: *"Ambil transcript video
+   https://youtu.be/xxxxxxxxxxx lalu ringkas isinya"* -- Claude akan
+   otomatis memanggil `fetch_transcript` lalu `summarize`.
+
+### Catatan
+
+- **Riwayat & cache dibagi dengan app Streamlit** -- keduanya baca/tulis
+  `video_history.json` yang sama di folder `transcript-app/`, jadi video
+  yang sudah diproses lewat Streamlit langsung terlihat di `list_history`
+  MCP, dan sebaliknya (lihat batasan #2 -- tidak permanen di Streamlit
+  Cloud, tapi lokal di komputer sendiri aman selama file tidak dihapus).
+- Server ini dirancang untuk **dijalankan lokal** (komputer sendiri), bukan
+  Streamlit Cloud -- MCP pakai koneksi stdio langsung ke proses Claude
+  Desktop/Code di mesin yang sama, bukan HTTP publik.
+- Untuk tes manual di luar Claude, jalankan `python mcp_server.py` --
+  server akan menunggu koneksi stdio (tidak menampilkan apa-apa di
+  terminal kalau tidak ada client yang connect, itu normal).
 
 ---
 

@@ -1,0 +1,5 @@
+# Dependency tambahan HANYA untuk mcp_server.py (dijalankan lokal lewat
+# Claude Desktop/Code, BUKAN dideploy ke Streamlit Cloud) -- sengaja
+# dipisah dari requirements.txt supaya deployment Streamlit tidak perlu
+# install package yang tidak dipakainya.
+mcp[cli]<2
